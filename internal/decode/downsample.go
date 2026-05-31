@@ -1,14 +1,13 @@
-// downsample.go — Downsampler for the research package.
+// downsample.go implements audio downsampling for FT8 decoding.
 //
 // Port of subroutine ft8_downsample from wsjt-wsjtx/lib/ft8/ft8_downsample.f90
 // and subroutine twkfreq1 from wsjt-wsjtx/lib/ft8/twkfreq1.f90.
-//
-// Ported directly from the Fortran source — this file has zero production
-// ft8x dependencies.
 
-package goft8
+package decode
 
 import (
+	"github.com/bh4gdf/goft8/internal/dsp"
+	ft8params "github.com/bh4gdf/goft8/params"
 	"math"
 	"math/cmplx"
 )
@@ -25,10 +24,11 @@ type Downsampler struct {
 	cx    []complex128 // Cached spectrum (NFFT1DS/2+1 elements)
 	taper [101]float64 // Raised-cosine edge taper
 	c1buf []complex128 // Reused buffer for downsample intermediate (nfft2)
+	xbuf  []float32    // Reused buffer for input scaling
 	ready bool
 }
 
-const cxLen = NFFT1DS/2 + 1 // 96001
+const cxLen = ft8params.NFFT1DS/2 + 1 // 96001
 
 // NewDownsampler creates a Downsampler and precomputes the edge taper.
 //
@@ -62,8 +62,8 @@ func NewDownsampler() *Downsampler {
 // wsjt-wsjtx/lib/ft8/ft8_downsample.f90 (all 52 lines).
 func (d *Downsampler) Downsample(dd []float32, newdat *bool, f0 float64) []complex128 {
 	const (
-		nfft1 = NFFT1DS // 192000
-		nfft2 = NFFT2   // 3200
+		nfft1 = ft8params.NFFT1DS // 192000
+		nfft2 = ft8params.NFFT2   // 3200
 	)
 
 	// Fortran lines 23–29:
@@ -77,7 +77,15 @@ func (d *Downsampler) Downsample(dd []float32, newdat *bool, f0 float64) []compl
 		if d.cx == nil {
 			d.cx = make([]complex128, cxLen)
 		}
-		RealFFTInto(d.cx, dd, nfft1)
+		// Match MSHV ft8_downsample: x[i] = dd[i] * 0.01
+		if len(d.xbuf) < len(dd) {
+			d.xbuf = make([]float32, len(dd))
+		}
+		x := d.xbuf[:len(dd)]
+		for i, v := range dd {
+			x[i] = v * 0.01
+		}
+		dsp.RealFFTInto(d.cx, x, nfft1)
 		*newdat = false
 	}
 
@@ -89,10 +97,10 @@ func (d *Downsampler) Downsample(dd []float32, newdat *bool, f0 float64) []compl
 	//   it=min(nint(ft/df),NFFT1/2)
 	//   fb=f0-1.5*baud
 	//   ib=max(1,nint(fb/df))
-	df := Fs / float64(nfft1)
+	df := ft8params.Fs / float64(nfft1)
 	i0 := int(math.Round(f0 / df))
 
-	baud := Fs / NSPS
+	baud := ft8params.Fs / ft8params.NSPS
 	ft := f0 + 8.5*baud
 	fb := f0 - 1.5*baud
 
@@ -138,14 +146,15 @@ func (d *Downsampler) Downsample(dd []float32, newdat *bool, f0 float64) []compl
 		}
 	}
 
-	// Fortran line 45: c1=cshift(c1,i0-ib)
+	// Fortran line 45: c1=decode.Cshift(c1,i0-ib)
 	// In-place circular shift to avoid allocation.
-	cshiftInPlace(c1, i0-ib)
+	CshiftInPlace(c1, i0-ib)
 
 	// Reuse c1 as the IFFT output buffer (in-place).
-	IFFTInto(c1, c1)
+	dsp.IFFTInto(c1, c1)
 
 	// Fortran lines 47–48: scaling.
+	// NFFT2 factor compensates for gonum IFFT's 1/N normalization (fftw has none).
 	fac := float64(nfft2) / math.Sqrt(float64(nfft1)*float64(nfft2))
 	for i := range c1 {
 		c1[i] *= complex(fac, 0)
@@ -156,7 +165,7 @@ func (d *Downsampler) Downsample(dd []float32, newdat *bool, f0 float64) []compl
 
 // cshift is Fortran's CSHIFT(array, shift): circular left-shift by shift
 // positions.  Matches Fortran intrinsic CSHIFT semantics exactly.
-func cshift(x []complex128, shift int) []complex128 {
+func Cshift(x []complex128, shift int) []complex128 {
 	n := len(x)
 	if n == 0 {
 		return x
@@ -171,8 +180,8 @@ func cshift(x []complex128, shift int) []complex128 {
 	return out
 }
 
-// cshiftInPlace performs a circular left-shift on x without allocation.
-func cshiftInPlace(x []complex128, shift int) {
+// CshiftInPlace performs a circular left-shift on x without allocation.
+func CshiftInPlace(x []complex128, shift int) {
 	n := len(x)
 	if n == 0 {
 		return

@@ -1,9 +1,7 @@
-// constants.go — All FT8 constants for the research package.
+// Package params defines all FT8 algorithm constants.
 //
-// These match ft8_params.f90 and production ft8x params.go exactly.
-// Having them local keeps the research package fully self-contained.
-
-package goft8
+// These match ft8_params.f90 and WSJT-X 2.7.0 exactly.
+package params
 
 // ── Constants previously imported as ft8x.* ──────────────────────────────
 
@@ -37,12 +35,14 @@ const (
 
 	// MaxIterations is the maximum number of BP decoder iterations.
 	MaxIterations = 30
-
-	// ── LDPC (174,91) code parameters ─────────────────────────────────
-	LDPCn   = 174 // codeword length
-	LDPCk   = 91  // message length (77 + 14 CRC)
-	LDPCm   = 83  // number of parity checks
-	LDPCncw = 3   // checks per bit
+	// LDPCn is the codeword length of the (174,91) LDPC code.
+	LDPCn = 174
+	// LDPCk is the message length (77 payload bits + 14 CRC bits).
+	LDPCk = 91
+	// LDPCm is the number of parity-check equations.
+	LDPCm = 83
+	// LDPCncw is the number of checks per bit (column weight).
+	LDPCncw = 3
 )
 
 // GrayMap maps 3-bit binary index to 8-FSK tone number.

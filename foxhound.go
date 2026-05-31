@@ -27,10 +27,10 @@ const (
 
 // FoxHoundParams holds tunable parameters for Fox/Hound operation.
 type FoxHoundParams struct {
-	Mode     FoxHoundMode
-	TxFreq   float64 // nominal transmit frequency (Hz)
-	RxFreq   float64 // nominal receive frequency (Hz)
-	NSlots   int     // number of slots (Fox only)
+	Mode   FoxHoundMode
+	TxFreq float64 // nominal transmit frequency (Hz)
+	RxFreq float64 // nominal receive frequency (Hz)
+	NSlots int     // number of slots (Fox only)
 }
 
 // DecodeFoxHound attempts to decode Fox/Hound signals.

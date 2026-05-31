@@ -3,7 +3,7 @@
 // Port of MSHV's hash table management (save_hash_call, hash10, hash12, hash22).
 // Maintains bidirectional 10-bit, 12-bit, and 22-bit hash tables.
 
-package goft8
+package protocol
 
 import (
 	"strings"
@@ -17,7 +17,7 @@ const (
 )
 
 var (
-	hashMu     sync.RWMutex
+	hashMu      sync.RWMutex
 	hash10Table [maxHash10]string
 	hash12Table [maxHash12]string
 	hash22Table map[int]string // 22-bit hash space is too large for array
@@ -38,9 +38,9 @@ func SaveHashCall(callsign string) {
 	hashMu.Lock()
 	defer hashMu.Unlock()
 
-	n10 := hashCall(cs, 10)
-	n12 := hashCall(cs, 12)
-	n22 := hashCall(cs, 22)
+	n10 := HashCall(cs, 10)
+	n12 := HashCall(cs, 12)
+	n22 := HashCall(cs, 22)
 
 	if n10 >= 0 && n10 < maxHash10 {
 		hash10Table[n10] = cs

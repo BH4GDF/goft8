@@ -22,6 +22,8 @@ var captureFixtures = []struct {
 	name    string
 	file    string
 	want    int
+	freqMin int
+	freqMax int
 	mustSee []string // sample of decodes that must appear in the result set
 }{
 	{
@@ -31,6 +33,8 @@ var captureFixtures = []struct {
 		name: "ft8_cap1",
 		file: "ft8_cap1.wav",
 		want: 11,
+		freqMin: 200,
+		freqMax: 2600,
 		mustSee: []string{
 			"CQ PV8AJ FJ92",
 			"KB7THX WB9VGJ RR73",
@@ -41,6 +45,8 @@ var captureFixtures = []struct {
 		name: "ft8_cap2",
 		file: "ft8_cap2.wav",
 		want: 15,
+		freqMin: 200,
+		freqMax: 2600,
 		mustSee: []string{
 			"CQ ZS4AW KG31",
 			"CQ SV0TPN KM28",
@@ -51,11 +57,25 @@ var captureFixtures = []struct {
 		name: "ft8_cap3",
 		file: "ft8_cap3.wav",
 		want: 23,
+		freqMin: 200,
+		freqMax: 2600,
 		mustSee: []string{
 			"CQ KB3Z FN20",
 			"CQ NH6D BL02",
 			"CQ UR5QW KN77",
 			"CQ SP4MSY KO13",
+		},
+	},
+	{
+		name: "ft8_cap4",
+		file: "ft8_cap4.wav",
+		want: 21,
+		freqMin: 100,
+		freqMax: 3000,
+		mustSee: []string{
+			"JS1JTN/P HL5BPF -10",
+			"BG7HFE JI1CUL PM95",
+			"JF2AIJ JH4IJG PM64",
 		},
 	},
 }
@@ -73,9 +93,13 @@ func TestDecodeCaptures(t *testing.T) {
 				t.Skipf("fixture not present: %s", path)
 			}
 
+			freqMin, freqMax := tc.freqMin, tc.freqMax
+			if freqMin == 0 && freqMax == 0 {
+				freqMin, freqMax = 200, 2600
+			}
 			decodes, err := DecodeWAV(
 				path,
-				WithFreqRange(200, 2600),
+				WithFreqRange(freqMin, freqMax),
 				WithDepth(DepthDeep),
 				WithAPEnabled(true),
 				WithCQOnlyAP(true),

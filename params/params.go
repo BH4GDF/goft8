@@ -1,9 +1,8 @@
-// params.go — FT8 constants for the research package.
+// ft8params.go defines core FT8 timing and tone constants.
 //
-// Duplicated from the root ft8x package to keep research self-contained.
-// These match ft8_params.f90 exactly.
+// These match ft8_params.f90 and WSJT-X 2.7.0 exactly.
 
-package goft8
+package params
 
 const (
 	// Fs is the audio sample rate (Hz).

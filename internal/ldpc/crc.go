@@ -1,11 +1,11 @@
-// crc.go — CRC-14 computation for the research package.
+// crc.go implements CRC-14 computation for FT8 messages.
 //
 // Port of subroutine get_crc14 from wsjt-wsjtx/lib/ft8/get_crc14.f90
 // and subroutine chkcrc14a from wsjt-wsjtx/lib/ft8/chkcrc14a.f90.
-//
-// Pure port — no production dependency.
 
-package goft8
+package ldpc
+
+import ft8params "github.com/bh4gdf/goft8/params"
 
 // crc14Poly is the 15-bit CRC-14 polynomial (LFSR representation).
 // p = {1,1,0,0,1,1,1,0,1,0,1,0,1,1,1}  (bit 14 first)
@@ -50,15 +50,15 @@ func crc14Bits(mc []int8) uint16 {
 //	m96[82:95] = cw[77:90]  (14 CRC bits)
 //
 // Returns true if CRC is consistent.
-func checkCRC14Codeword(cw [LDPCn]int8) bool {
+func checkCRC14Codeword(cw [ft8params.LDPCn]int8) bool {
 	var m96 [96]int8
 	copy(m96[:77], cw[:77])
 	copy(m96[82:96], cw[77:91])
 	return crc14Bits(m96[:]) == 0
 }
 
-// computeCRC14 computes the 14-bit CRC for a 77-bit message.
-func computeCRC14(msgBits [77]int8) uint16 {
+// ldpc.ComputeCRC14 computes the 14-bit CRC for a 77-bit message.
+func ComputeCRC14(msgBits [77]int8) uint16 {
 	var m96 [96]int8
 	copy(m96[:77], msgBits[:])
 	return crc14Bits(m96[:])

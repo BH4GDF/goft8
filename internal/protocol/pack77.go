@@ -5,7 +5,7 @@
 //
 // Supports all major FT8 message types matching MSHV priority order.
 
-package goft8
+package protocol
 
 import (
 	"math/big"
@@ -200,13 +200,13 @@ func packDXpedition(msg string) ([77]int8, bool) {
 		return [77]int8{}, false
 	}
 
-	n28a := pack28(call1)
-	n28b := pack28(call2)
+	n28a := Pack28(call1)
+	n28b := Pack28(call2)
 	if n28a < 0 || n28b < 0 {
 		return [77]int8{}, false
 	}
 
-	n10 := hashCall(call3, 10) & 0x3FF
+	n10 := HashCall(call3, 10) & 0x3FF
 	SaveHashCall(call3)
 
 	var bits [77]int8
@@ -279,8 +279,8 @@ func packFieldDay(msg string) ([77]int8, int, bool) {
 		intx = ntx - 17
 	}
 
-	n28a := pack28(call1)
-	n28b := pack28(call2)
+	n28a := Pack28(call1)
+	n28b := Pack28(call2)
 
 	var bits [77]int8
 	writeBits(&bits, 0, 28, n28a)
@@ -342,8 +342,8 @@ func packStandardMessage(msg string) ([77]int8, int, bool) {
 	}
 
 	// Encode callsigns.
-	n28a := pack28(call1)
-	n28b := pack28(call2)
+	n28a := Pack28(call1)
+	n28b := Pack28(call2)
 	if n28a < 0 || n28b < 0 {
 		return [77]int8{}, 0, false
 	}
@@ -448,7 +448,7 @@ func packNonStandardCall(msg string) ([77]int8, bool) {
 				if n58 < 0 {
 					return [77]int8{}, false
 				}
-				n12 = hashCall(parts[0], 12) & 0xFFF
+				n12 = HashCall(parts[0], 12) & 0xFFF
 				SaveHashCall(call2)
 			} else if strings.HasPrefix(parts[0], "<") && strings.HasSuffix(parts[0], ">") {
 				iflip = 1
@@ -458,7 +458,7 @@ func packNonStandardCall(msg string) ([77]int8, bool) {
 				if n58 < 0 {
 					return [77]int8{}, false
 				}
-				n12 = hashCall(parts[1], 12) & 0xFFF
+				n12 = HashCall(parts[1], 12) & 0xFFF
 				SaveHashCall(call1)
 			} else {
 				return [77]int8{}, false
@@ -473,7 +473,7 @@ func packNonStandardCall(msg string) ([77]int8, bool) {
 			if n58 < 0 {
 				return [77]int8{}, false
 			}
-			n12 = hashCall(parts[0], 12) & 0xFFF
+			n12 = HashCall(parts[0], 12) & 0xFFF
 			SaveHashCall(call2)
 		} else if strings.HasPrefix(parts[0], "<") && strings.HasSuffix(parts[0], ">") {
 			iflip = 1
@@ -483,7 +483,7 @@ func packNonStandardCall(msg string) ([77]int8, bool) {
 			if n58 < 0 {
 				return [77]int8{}, false
 			}
-			n12 = hashCall(parts[1], 12) & 0xFFF
+			n12 = HashCall(parts[1], 12) & 0xFFF
 			SaveHashCall(call1)
 		} else {
 			return [77]int8{}, false
@@ -560,8 +560,8 @@ func packRTTYContest(msg string) ([77]int8, bool) {
 		return [77]int8{}, false
 	}
 
-	n28a := pack28(call1)
-	n28b := pack28(call2)
+	n28a := Pack28(call1)
+	n28b := Pack28(call2)
 	if n28a < 0 || n28b < 0 {
 		return [77]int8{}, false
 	}
@@ -670,8 +670,8 @@ func packEUVHF(msg string) ([77]int8, bool) {
 		iserial = 2047
 	}
 
-	n12 := hashCall(call1, 12) & 0xFFF
-	n22 := hashCall(call2, 22) & 0x3FFFFF
+	n12 := HashCall(call1, 12) & 0xFFF
+	n22 := HashCall(call2, 22) & 0x3FFFFF
 	SaveHashCall(call1)
 	SaveHashCall(call2)
 

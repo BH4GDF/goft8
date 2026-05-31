@@ -1,19 +1,56 @@
-// fft.go — Mixed-radix FFT for goft8.
+// fft.go — FT8 DSP routines using FFTW3 via CGO.
 //
-// Implements a recursive Cooley-Tukey decimation-in-time FFT supporting
-// radix-2, radix-3, and radix-5 butterflies. All FT8 FFT sizes (192000,
-// 180000, 3840, 3200, 1920) are 5-smooth and use this path.
-//
-// Pure Go — no CGO dependency. A CGO-FFTW backend may be added in a
-// future release for the hot spectrogram path; the pure-Go version here
-// is correct but ~40x slower than FFTW for 3840-point.
+// This branch assumes CGO and FFTW3 are always available.
 
-package goft8
+package dsp
 
 import (
+	ft8params "github.com/bh4gdf/goft8/params"
 	"math"
 	"sync"
 )
+
+// fixedPool is a non-GC-cleared object pool.
+type fixedPool[T any] struct {
+	mu     sync.Mutex
+	items  []T
+	maxLen int
+	evict  func(T)
+}
+
+func newFixedPool[T any](maxLen int) *fixedPool[T] {
+	return &fixedPool[T]{maxLen: maxLen}
+}
+
+func newFixedPoolWithEvict[T any](maxLen int, evict func(T)) *fixedPool[T] {
+	return &fixedPool[T]{maxLen: maxLen, evict: evict}
+}
+
+func (p *fixedPool[T]) get(newFn func() T) T {
+	p.mu.Lock()
+	if n := len(p.items); n > 0 {
+		item := p.items[n-1]
+		p.items = p.items[:n-1]
+		p.mu.Unlock()
+		return item
+	}
+	p.mu.Unlock()
+	return newFn()
+}
+
+func (p *fixedPool[T]) put(item T) {
+	p.mu.Lock()
+	if len(p.items) < p.maxLen {
+		p.items = append(p.items, item)
+		p.mu.Unlock()
+		return
+	}
+	evict := p.evict
+	p.mu.Unlock()
+	if evict != nil {
+		evict(item)
+	}
+}
 
 // twiddleCache stores pre-computed twiddle factors W_N^k = exp(-j·2π·k/N)
 // for each FFT size N encountered.  FT8 only uses a handful of sizes
@@ -39,69 +76,74 @@ func getTwiddles(n int) []complex128 {
 // SpectrogramFFT3840 computes a 3840-point real-to-complex FFT of a
 // real-valued input and returns the power spectrum |X[i]|^2 for bins
 // 1..NH1.
-func SpectrogramFFT3840(x []float32) [NH1]float64 {
-	buf := specFFTx64Pool.Get().([]float64)
-	defer specFFTx64Pool.Put(buf)
-	dst := specFFTdstPool.Get().([]complex128)
-	defer specFFTdstPool.Put(dst)
+func SpectrogramFFT3840(x []float32) [ft8params.NH1]float64 {
+	buf := specFFTx64Pool.get(func() []float64 { return make([]float64, ft8params.NFFT1) })
+	defer specFFTx64Pool.put(buf)
+	dst := specFFTdstPool.get(func() []complex128 { return make([]complex128, ft8params.NFFT1/2+1) })
+	defer specFFTdstPool.put(dst)
 
 	n := len(x)
-	if n > NFFT1 {
-		n = NFFT1
+	if n > ft8params.NFFT1 {
+		n = ft8params.NFFT1
 	}
 	for i := 0; i < n; i++ {
 		buf[i] = float64(x[i])
 	}
-	for i := n; i < NFFT1; i++ {
+	for i := n; i < ft8params.NFFT1; i++ {
 		buf[i] = 0
 	}
-	fft := getFFT(NFFT1)
-	defer putFFT(NFFT1, fft)
-	spec := fft.Coefficients(dst, buf)
-	var pow [NH1]float64
-	for i := 1; i <= NH1; i++ {
-		re := real(spec[i])
-		im := imag(spec[i])
+	fftwRealFFTInto(dst, buf, ft8params.NFFT1)
+	var pow [ft8params.NH1]float64
+	for i := 1; i <= ft8params.NH1; i++ {
+		re := real(dst[i])
+		im := imag(dst[i])
 		pow[i-1] = re*re + im*im
 	}
 	return pow
 }
 
 // specFFTx64Pool reuses the float64 input buffer for SpectrogramFFT3840.
-var specFFTx64Pool = sync.Pool{New: func() interface{} { return make([]float64, NFFT1) }}
+var specFFTx64Pool = newFixedPool[[]float64](128)
 
 // specFFTdstPool reuses the complex128 output buffer for SpectrogramFFT3840.
 // A 3840-point real FFT produces 1921 complex coefficients.
-var specFFTdstPool = sync.Pool{New: func() interface{} { return make([]complex128, NFFT1/2+1) }}
+var specFFTdstPool = newFixedPool[[]complex128](128)
+
+func init() {
+	for i := 0; i < 64; i++ {
+		specFFTx64Pool.put(make([]float64, ft8params.NFFT1))
+		specFFTdstPool.put(make([]complex128, ft8params.NFFT1/2+1))
+	}
+}
 
 // FFT computes the forward complex-to-complex FFT (unnormalized).
 //
 // X[k] = sum_{n=0}^{N-1} x[n] * exp(-j*2*pi*k*n/N)
-//
-// Input length must be 5-smooth (only factors of 2, 3, 5).
 func FFT(x []complex128) []complex128 {
 	n := len(x)
-	fft := getCmplxFFT(n)
-	defer putCmplxFFT(n, fft)
-	return fft.Coefficients(nil, x)
+	dst := make([]complex128, n)
+	fftwCmplxFFTInto(dst, x)
+	return dst
 }
 
 // FFTInto computes the forward FFT and stores the result in dst.
 // dst may be nil, in which case a new slice is allocated.
 func FFTInto(dst, x []complex128) []complex128 {
 	n := len(x)
-	fft := getCmplxFFT(n)
-	defer putCmplxFFT(n, fft)
-	return fft.Coefficients(dst, x)
+	if cap(dst) < n {
+		dst = make([]complex128, n)
+	} else {
+		dst = dst[:n]
+	}
+	fftwCmplxFFTInto(dst, x)
+	return dst
 }
 
 // IFFT computes the inverse complex-to-complex FFT (normalized by 1/N).
 func IFFT(x []complex128) []complex128 {
 	n := len(x)
-	fft := getCmplxFFT(n)
-	defer putCmplxFFT(n, fft)
 	dst := make([]complex128, n)
-	fft.Sequence(dst, x)
+	fftwCmplxIFFTInto(dst, x)
 	scale := 1.0 / float64(n)
 	for i := range dst {
 		dst[i] *= complex(scale, 0)
@@ -113,9 +155,7 @@ func IFFT(x []complex128) []complex128 {
 // dst must have length >= len(x).
 func IFFTInto(dst, x []complex128) {
 	n := len(x)
-	fft := getCmplxFFT(n)
-	defer putCmplxFFT(n, fft)
-	fft.Sequence(dst, x)
+	fftwCmplxIFFTInto(dst, x)
 	scale := 1.0 / float64(n)
 	for i := 0; i < n; i++ {
 		dst[i] *= complex(scale, 0)
@@ -139,6 +179,8 @@ func smallestFactor(n int) int {
 
 // fftMixedRadix computes an in-place forward FFT using recursive
 // decimation-in-time with mixed radix-2/3/5 butterflies.
+//
+// Pure-Go fallback kept for reference; the hot paths use FFTW3.
 func fftMixedRadix(x []complex128) []complex128 {
 	n := len(x)
 	if n <= 1 {

@@ -1,11 +1,9 @@
-// pack28.go — Callsign packing for the research package.
+// pack28.go implements 28-bit callsign packing/unpacking.
 //
 // Port of pack28 from wsjt-wsjtx/lib/77bit/packjt77.f90 lines 621–751,
 // ihashcall from lines 64–79, and stdcall from lib/qra/q65/q65_set_list.f90.
-//
-// Pure port — no production dependency.
 
-package goft8
+package protocol
 
 import "strings"
 
@@ -29,7 +27,7 @@ var (
 // Parameters:
 //   - callsign: up to 11 characters
 //   - m: number of hash bits (10, 12, or 22)
-func hashCall(callsign string, m int) int {
+func HashCall(callsign string, m int) int {
 	c := " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ/"
 	// Pad or truncate to 11 characters
 	cs := callsign
@@ -115,7 +113,7 @@ func isStdCall(callsign string) bool {
 //   - Special tokens: DE, QRZ, CQ, CQ_nnn, CQ_AAAA
 //   - Standard callsigns: 6-char packed encoding
 //   - Non-standard callsigns: 22-bit hash
-func pack28(callsign string) int {
+func Pack28(callsign string) int {
 	cs := strings.TrimSpace(strings.ToUpper(callsign))
 
 	// Special tokens (packjt77.f90 lines 652-696)
@@ -173,7 +171,7 @@ func pack28(callsign string) int {
 	// Check for standard callsign
 	if !isStdCall(cs) {
 		// Non-standard: 22-bit hash
-		n22 := hashCall(cs, 22)
+		n22 := HashCall(cs, 22)
 		return (packNTOKENS + n22) & ((1 << 28) - 1)
 	}
 
@@ -216,7 +214,7 @@ func pack28(callsign string) int {
 
 	if i1 < 0 || i2 < 0 || i3 < 0 || i4 < 0 || i5 < 0 || i6 < 0 {
 		// Invalid character — fall back to hash
-		n22 := hashCall(cs, 22)
+		n22 := HashCall(cs, 22)
 		return (packNTOKENS + n22) & ((1 << 28) - 1)
 	}
 

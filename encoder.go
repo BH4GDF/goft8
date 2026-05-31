@@ -1,24 +1,47 @@
 package goft8
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
+	"runtime"
 	"sync"
+
+	"github.com/bh4gdf/goft8/internal/encode"
+	"github.com/bh4gdf/goft8/internal/protocol"
 )
 
 // NTXSamples is the number of 12 kHz mono samples in a single FT8
 // transmission (12.64 s × 12 kHz).
 const NTXSamples = 151680
 
-// Encoder generates the 12 kHz audio waveform for an FT8 message, for
-// TX-side use. v0.1 ships the API shape only so that callers can
-// import and reference ft8.Encoder immediately; the transmit path
-// will be implemented in v0.2.
+// FT8 TX frequency limits, matching MSHV v2.76:
+//
+//	frq00_limit=20, frq01_limit=4980, dflimit=60
+//	clamped to [frq00_limit+dflimit, frq01_limit-dflimit].
+const (
+	ft8TxFreqMin = 80.0   // 20 + 60
+	ft8TxFreqMax = 4920.0 // 4980 - 60
+)
+
+// Encoder generates the audio waveform for an FT8 message, for
+// TX-side use.
 type Encoder struct {
 	cfg encoderConfig
 }
 
 type encoderConfig struct {
-	txFreq float64
+	txFreq     float64
+	sampleRate int
+	bitDepth   int
+}
+
+func defaultEncoderConfig() encoderConfig {
+	return encoderConfig{
+		txFreq:     1500,
+		sampleRate: 48000, // 48 kHz default (sound card compatible)
+		bitDepth:   24,    // 24-bit PCM default (MSHV TX style)
+	}
 }
 
 // MessageFreq pairs a text message with its TX frequency for FDMA.
@@ -27,16 +50,36 @@ type MessageFreq struct {
 	Freq    float64
 }
 
-func defaultEncoderConfig() encoderConfig {
-	return encoderConfig{txFreq: 1500}
-}
-
 // EncoderOption configures an Encoder at construction time.
 type EncoderOption func(*encoderConfig)
 
-// WithTxFreq sets the carrier frequency in Hz. Defaults to 1500.
+// WithTxFreq sets the carrier frequency in Hz.
+// The value is clamped to the FT8 band [80, 4920] Hz (MSHV limits).
+// Defaults to 1500.
 func WithTxFreq(hz float64) EncoderOption {
-	return func(c *encoderConfig) { c.txFreq = hz }
+	return func(c *encoderConfig) { c.txFreq = clampTxFreq(hz) }
+}
+
+func clampTxFreq(hz float64) float64 {
+	if hz < ft8TxFreqMin {
+		return ft8TxFreqMin
+	}
+	if hz > ft8TxFreqMax {
+		return ft8TxFreqMax
+	}
+	return hz
+}
+
+// WithSampleRate sets the output sample rate in Hz.
+// Supported values are 12000 (default) and 48000.
+func WithSampleRate(sr int) EncoderOption {
+	return func(c *encoderConfig) { c.sampleRate = sr }
+}
+
+// WithBitDepth sets the output PCM bit depth.
+// Supported values are 16 (default), 24, and 32.
+func WithBitDepth(bits int) EncoderOption {
+	return func(c *encoderConfig) { c.bitDepth = bits }
 }
 
 // NewEncoder creates an Encoder with the given options.
@@ -48,7 +91,14 @@ func NewEncoder(opts ...EncoderOption) *Encoder {
 	return &Encoder{cfg: cfg}
 }
 
-// encodeBufPool reuses the NTXSamples-length buffers needed by
+// txSamples returns the number of samples for one FT8 frame at the
+// encoder's configured sample rate.
+func (e *Encoder) txSamples() int {
+	_, nwave, _ := encode.EncodeParams(e.cfg.sampleRate)
+	return nwave
+}
+
+// encodeBufPool reuses the txSamples-length buffers needed by
 // EncodeMulti.  Each goroutine borrows its own.
 var encodeBufPool = sync.Pool{
 	New: func() interface{} {
@@ -57,56 +107,203 @@ var encodeBufPool = sync.Pool{
 }
 
 // Encode generates the GFSK-modulated waveform for a single FT8
-// message. Returns NTXSamples samples of 12 kHz mono PCM.
+// message. Returns float32 samples at the configured sample rate.
 func (e *Encoder) Encode(msg string) ([]float32, error) {
-	// Pack the message into 77 bits.
-	bits, _, _, ok := Pack77(msg)
+	bits, _, _, ok := protocol.Pack77(msg)
 	if !ok {
 		return nil, fmt.Errorf("ft8: cannot pack message %q", msg)
 	}
 
-	// Generate 79 channel tones from the 77-bit message.
-	itone := GenFT8Tones(bits)
-
-	// Generate the real-valued GFSK waveform (avoids complex128 allocation).
-	return GenFT8Wave(itone, e.cfg.txFreq), nil
+	itone := encode.GenFT8Tones(bits)
+	f0 := clampTxFreq(e.cfg.txFreq)
+	return encode.GenFT8WaveSR(itone, f0, e.cfg.sampleRate), nil
 }
 
 // EncodeMulti generates a single waveform that contains multiple FT8
 // messages on different carrier frequencies (FDMA). The individual
 // real GFSK waveforms are linearly summed. The caller may scale
 // the result before playback or writing to a file to avoid clipping.
+//
+// Each message frequency is clamped to [80, 4920] Hz.  Messages are
+// processed in list order; earlier messages have higher priority.
+// A later message must be at least 60 Hz away from *all* previously
+// accepted messages.  If it is too close to any earlier one, an error
+// is returned and that message is rejected.
 func (e *Encoder) EncodeMulti(msgs []MessageFreq) ([]float32, error) {
 	if len(msgs) == 0 {
 		return nil, fmt.Errorf("ft8: no messages to encode")
 	}
+
+	nsamples := e.txSamples()
 
 	// Borrow a zeroed accumulation buffer from the pool.
 	sum := encodeBufPool.Get().([]float32)
 	for i := range sum {
 		sum[i] = 0
 	}
+	// Ensure the buffer is large enough for the configured rate.
+	if len(sum) < nsamples {
+		sum = make([]float32, nsamples)
+	}
 
-	for _, mf := range msgs {
-		bits, _, _, ok := Pack77(mf.Message)
+	// Keep track of accepted frequencies (in list order) for spacing checks.
+	var accepted []float64
+
+	type waveJob struct {
+		f0   float64
+		bits [77]int8
+	}
+	jobs := make([]waveJob, 0, len(msgs))
+
+	for i, mf := range msgs {
+		f0 := clampTxFreq(mf.Freq)
+		for _, prev := range accepted {
+			if math.Abs(f0-prev) < 60.0 {
+				encodeBufPool.Put(sum[:NTXSamples])
+				return nil, fmt.Errorf("ft8: message %d frequency %.1f Hz is too close to earlier message at %.1f Hz (min spacing 60 Hz)", i, f0, prev)
+			}
+		}
+		accepted = append(accepted, f0)
+
+		bits, _, _, ok := protocol.Pack77(mf.Message)
 		if !ok {
-			encodeBufPool.Put(sum)
+			encodeBufPool.Put(sum[:NTXSamples])
 			return nil, fmt.Errorf("ft8: cannot pack message %q", mf.Message)
 		}
-		itone := GenFT8Tones(bits)
-		wave := GenFT8Wave(itone, mf.Freq)
-		for i, v := range wave {
-			sum[i] += v
+		jobs = append(jobs, waveJob{f0: f0, bits: bits})
+	}
+
+	// Generate waveforms in parallel — tone generation and GFSK synthesis
+	// are CPU-bound and independent per message.
+	waves := make([][]float32, len(jobs))
+	var wg sync.WaitGroup
+	for i, job := range jobs {
+		wg.Add(1)
+		go func(idx int, j waveJob) {
+			defer wg.Done()
+			itone := encode.GenFT8Tones(j.bits)
+			waves[idx] = encode.GenFT8WaveSR(itone, j.f0, e.cfg.sampleRate)
+		}(i, job)
+	}
+	wg.Wait()
+
+	// Accumulate waveforms. For 3+ messages use parallel reduction over
+	// segments of the sample buffer to saturate memory bandwidth.
+	if len(waves) >= 3 {
+		nseg := runtime.GOMAXPROCS(0)
+		if nseg > len(waves) {
+			nseg = len(waves)
+		}
+		chunk := (nsamples + nseg - 1) / nseg
+		var wg sync.WaitGroup
+		for s := 0; s < nseg; s++ {
+			start := s * chunk
+			end := start + chunk
+			if start >= nsamples {
+				continue
+			}
+			if end > nsamples {
+				end = nsamples
+			}
+			wg.Add(1)
+			go func(s, e int) {
+				defer wg.Done()
+				for _, wave := range waves {
+					for i := s; i < e; i++ {
+						sum[i] += wave[i]
+					}
+				}
+			}(start, end)
+		}
+		wg.Wait()
+	} else {
+		for _, wave := range waves {
+			for i, v := range wave {
+				sum[i] += v
+			}
 		}
 	}
 
 	// Copy out and scale to avoid clipping.
 	scale := float32(len(msgs))
-	waveform := make([]float32, NTXSamples)
-	for i, v := range sum {
+	waveform := make([]float32, nsamples)
+	for i, v := range sum[:nsamples] {
 		waveform[i] = v / scale
 	}
 
-	encodeBufPool.Put(sum)
+	encodeBufPool.Put(sum[:NTXSamples])
 	return waveform, nil
+}
+
+// EncodeToBytes generates the waveform and converts it to raw PCM bytes
+// at the configured sample rate and bit depth.
+func (e *Encoder) EncodeToBytes(msg string) ([]byte, error) {
+	wave, err := e.Encode(msg)
+	if err != nil {
+		return nil, err
+	}
+	return FloatToPCM(wave, e.cfg.bitDepth), nil
+}
+
+// FloatToPCM converts float32 samples in [-1,1] to raw PCM bytes.
+func FloatToPCM(samples []float32, bitDepth int) []byte {
+	switch bitDepth {
+	case 24:
+		return floatToPCM24(samples)
+	case 32:
+		return floatToPCM32(samples)
+	default:
+		return floatToPCM16(samples)
+	}
+}
+
+func floatToPCM16(samples []float32) []byte {
+	data := make([]byte, len(samples)*2)
+	for i, v := range samples {
+		if v > 1.0 {
+			v = 1.0
+		} else if v < -1.0 {
+			v = -1.0
+		}
+		s := int16(v * 32767.0)
+		binary.LittleEndian.PutUint16(data[i*2:], uint16(s))
+	}
+	return data
+}
+
+func floatToPCM24(samples []float32) []byte {
+	data := make([]byte, len(samples)*3)
+	for i, v := range samples {
+		if v > 1.0 {
+			v = 1.0
+		} else if v < -1.0 {
+			v = -1.0
+		}
+		// 24-bit signed, scaled to 8380000 (MSHV style, near full scale).
+		s := int32(v * 8380000.0)
+		if s > 8388607 {
+			s = 8388607
+		}
+		if s < -8388608 {
+			s = -8388608
+		}
+		data[i*3+0] = byte(s & 0xFF)
+		data[i*3+1] = byte((s >> 8) & 0xFF)
+		data[i*3+2] = byte((s >> 16) & 0xFF)
+	}
+	return data
+}
+
+func floatToPCM32(samples []float32) []byte {
+	data := make([]byte, len(samples)*4)
+	for i, v := range samples {
+		if v > 1.0 {
+			v = 1.0
+		} else if v < -1.0 {
+			v = -1.0
+		}
+		s := int32(v * 2147483647.0)
+		binary.LittleEndian.PutUint32(data[i*4:], uint32(s))
+	}
+	return data
 }

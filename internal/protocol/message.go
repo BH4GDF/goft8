@@ -1,13 +1,12 @@
-// message.go — Message unpacking for the research package.
+// message.go implements FT8 message unpacking (77-bit → text).
 //
 // Port of subroutine unpack77, unpack28, unpacktext77, to_grid4,
 // to_grid6, to_grid from wsjt-wsjtx/lib/77bit/packjt77.f90.
 //
-// Ported directly from the Fortran source — no production ft8x dependency.
 // Hash tables (hash10/hash12/hash22) are maintained in hash_table.go.
 // Hashed callsigns are resolved via SaveHashCall / Hash10 / Hash12 / Hash22.
 
-package goft8
+package protocol
 
 import (
 	"fmt"
@@ -73,10 +72,7 @@ var cmult = [171]string{
 	"X99",
 }
 
-// ────────────────────────────────────────────────────────────────────────────
 // BitsToC77 converts 77 int8 bits (0/1) to a 77-character string of '0'/'1'.
-// ────────────────────────────────────────────────────────────────────────────
-
 func BitsToC77(bits [77]int8) string {
 	var b [77]byte
 	for i, v := range bits {
@@ -97,14 +93,11 @@ func readBits(c77 string, pos, nbits int) int64 {
 	return v
 }
 
-// ────────────────────────────────────────────────────────────────────────────
 // Unpack77 decodes a 77-character binary string into a human-readable message.
 //
 // Port of subroutine unpack77 from wsjt-wsjtx/lib/77bit/packjt77.f90
 // lines 200–619.  nrx is hardcoded to 1 (received message).
 // Hash tables are not maintained — hashed callsigns appear as "<...>".
-// ────────────────────────────────────────────────────────────────────────────
-
 func Unpack77(c77 string) (string, bool) {
 	if len(c77) != 77 {
 		return "", false

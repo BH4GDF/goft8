@@ -1,11 +1,13 @@
-// ldpc_f32.go — Float32 variant of the LDPC BP decoder for the research package.
+// ldpc_f32.go implements the float32 LDPC BP decoder.
 //
-// This is a precision-matched port of subroutine decode174_91 from
+// Precision-matched port of subroutine decode174_91 from
 // wsjt-wsjtx/lib/ft8/decode174_91.f90, using float32 for all BP internal
 // arrays (tov, toc, tanhtoc, zn, zsum, zsave) to match Fortran's default
 // "real" type. The OSD path remains float64.
 
-package goft8
+package ldpc
+
+import ft8params "github.com/bh4gdf/goft8/params"
 
 import (
 	"math"
@@ -16,12 +18,18 @@ import (
 // implementation's default real type.
 //
 // Parameters and return values are identical to DecodeLDPC.
-func DecodeLDPCF32(llr [LDPCn]float64, keff, maxOSD, ndeep int, apmask [LDPCn]int8) (DecodeResult, bool) {
+func DecodeLDPCF32(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apmask [ft8params.LDPCn]int8) (DecodeResult, bool) {
+	return decodeLDPCCGO(llr, maxOSD, ndeep, apmask)
+}
+
+// decodeLDPCF32Go is the pure-Go fallback implementation.
+// Kept for reference and potential future use.
+func decodeLDPCF32Go(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apmask [ft8params.LDPCn]int8) (DecodeResult, bool) {
 	const (
-		n             = LDPCn
-		m             = LDPCm
-		k             = LDPCk
-		ncw           = LDPCncw
+		n             = ft8params.LDPCn
+		m             = ft8params.LDPCm
+		k             = ft8params.LDPCk
+		ncw           = ft8params.LDPCncw
 		maxIterations = 30
 	)
 
