@@ -68,6 +68,39 @@ func (d *Decoder) Decode(audio []float32) ([]Decoded, error) {
 	return out, nil
 }
 
+// DecodeStream runs the full decode pipeline on one 15-second audio window,
+// calling onDecode for each successfully decoded signal as soon as it is
+// recovered, before the next pass or candidate begins.
+//
+// The callback is invoked synchronously from the decoder goroutine(s);
+// keep it fast. The final return value still contains all decoded signals
+// in the same order as the callback firing order.
+func (d *Decoder) DecodeStream(audio []float32, onDecode func(Decoded)) ([]Decoded, error) {
+	if len(audio) != AudioSamplesPerCycle {
+		return nil, fmt.Errorf("goft8: audio length %d, want %d", len(audio), AudioSamplesPerCycle)
+	}
+
+	params := DecodeParams{
+		Depth:       d.cfg.depth,
+		APEnabled:   d.cfg.apEnabled,
+		APCQOnly:    d.cfg.cqOnlyAP,
+		APWidth:     25.0,
+		MyCall:      d.cfg.myCall,
+		DxCall:      d.cfg.dxCall,
+		MaxPasses:   d.cfg.maxPasses,
+		Workers:     d.cfg.workers,
+		OnCandidate: func(c DecodeCandidate) { onDecode(toDecoded(c)) },
+	}
+
+	raw := DecodeIterative(audio, params, float64(d.cfg.freqMin), float64(d.cfg.freqMax))
+
+	out := make([]Decoded, len(raw))
+	for i, r := range raw {
+		out[i] = toDecoded(r)
+	}
+	return out, nil
+}
+
 // Reset clears cross-cycle state maintained by the Decoder, equivalent
 // to starting a fresh receive session. Call this when changing band,
 // after a long idle, or to discard stale callsign history. Does not
@@ -82,7 +115,7 @@ func (d *Decoder) Reset() {
 // WAV file, runs the decoder once, and returns the decoded signals.
 // For a receive loop, create a Decoder once and reuse it.
 func DecodeWAV(path string, opts ...DecoderOption) ([]Decoded, error) {
-	audio, err := readWAVMono12k(path)
+	audio, err := ReadWAVMono12k(path)
 	if err != nil {
 		return nil, err
 	}
@@ -122,10 +155,10 @@ func clampSNR(snr float64) int {
 	return n
 }
 
-// readWAVMono12k decodes a PCM WAV file into float32 mono samples at
+// ReadWAVMono12k decodes a PCM WAV file into float32 mono samples at
 // 12 kHz. It accepts 16-bit integer or 32-bit float PCM at 12 kHz mono
 // and rejects anything else with a descriptive error.
-func readWAVMono12k(path string) ([]float32, error) {
+func ReadWAVMono12k(path string) ([]float32, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -205,7 +238,8 @@ func readWAVSamples(r io.Reader, size int, format uint16, bitsPer uint16) ([]flo
 		out := make([]float32, n)
 		for i := 0; i < n; i++ {
 			s := int16(binary.LittleEndian.Uint16(buf[i*2 : i*2+2]))
-			out[i] = float32(s) / 32768.0
+			// Match MSHV static_dat0 = raw_in_s * 0.000390625 scaling.
+			out[i] = float32(s) * 0.000390625
 		}
 		return out, nil
 	case format == 3 && bitsPer == 32:
@@ -242,13 +276,13 @@ func WriteWAVMono12k(path string, samples []float32) error {
 	binary.LittleEndian.PutUint32(header[4:8], fileSize)
 	copy(header[8:12], "WAVE")
 	copy(header[12:16], "fmt ")
-	binary.LittleEndian.PutUint32(header[16:20], 16)       // subchunk1Size
-	binary.LittleEndian.PutUint16(header[20:22], 1)        // audioFormat = PCM
-	binary.LittleEndian.PutUint16(header[22:24], 1)        // numChannels = mono
-	binary.LittleEndian.PutUint32(header[24:28], 12000)    // sampleRate
-	binary.LittleEndian.PutUint32(header[28:32], 24000)    // byteRate = 12000*1*2
-	binary.LittleEndian.PutUint16(header[32:34], 2)        // blockAlign
-	binary.LittleEndian.PutUint16(header[34:36], 16)       // bitsPerSample
+	binary.LittleEndian.PutUint32(header[16:20], 16)    // subchunk1Size
+	binary.LittleEndian.PutUint16(header[20:22], 1)     // audioFormat = PCM
+	binary.LittleEndian.PutUint16(header[22:24], 1)     // numChannels = mono
+	binary.LittleEndian.PutUint32(header[24:28], 12000) // sampleRate
+	binary.LittleEndian.PutUint32(header[28:32], 24000) // byteRate = 12000*1*2
+	binary.LittleEndian.PutUint16(header[32:34], 2)     // blockAlign
+	binary.LittleEndian.PutUint16(header[34:36], 16)    // bitsPerSample
 	copy(header[36:40], "data")
 	binary.LittleEndian.PutUint32(header[40:44], dataSize)
 

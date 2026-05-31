@@ -2,10 +2,11 @@
 // mode decoder and encoder.
 //
 // It is designed for embedding in amateur-radio station software and
-// targets WSJT-X 2.7.0 decode-yield parity in v0.1. The v0.1 public
-// surface is intentionally minimal: a stateful Decoder, a Decoded
-// result type, a Message parser, an Encoder stub, and a DecodeWAV
-// convenience.
+// targets WSJT-X 2.7.0 decode-yield parity. The public API includes:
+//   - Decoder: stateful FT8 decoder with iterative subtraction and AP support
+//   - Encoder: GFSK waveform generator with 12/48 kHz and 16/24/32-bit output
+//   - Message parser: structured parsing of decoded FT8 messages
+//   - WAV I/O: read/write mono WAV with automatic rate conversion
 //
 // Typical receive usage:
 //

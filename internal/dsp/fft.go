@@ -8,9 +8,10 @@
 // future release for the hot spectrogram path; the pure-Go version here
 // is correct but ~40x slower than FFTW for 3840-point.
 
-package goft8
+package dsp
 
 import (
+	ft8params "github.com/bh4gdf/goft8/params"
 	"math"
 	"sync"
 )
@@ -39,27 +40,27 @@ func getTwiddles(n int) []complex128 {
 // SpectrogramFFT3840 computes a 3840-point real-to-complex FFT of a
 // real-valued input and returns the power spectrum |X[i]|^2 for bins
 // 1..NH1.
-func SpectrogramFFT3840(x []float32) [NH1]float64 {
-	buf := specFFTx64Pool.Get().([]float64)
-	defer specFFTx64Pool.Put(buf)
-	dst := specFFTdstPool.Get().([]complex128)
-	defer specFFTdstPool.Put(dst)
+func SpectrogramFFT3840(x []float32) [ft8params.NH1]float64 {
+	buf := specFFTx64Pool.get(func() []float64 { return make([]float64, ft8params.NFFT1) })
+	defer specFFTx64Pool.put(buf)
+	dst := specFFTdstPool.get(func() []complex128 { return make([]complex128, ft8params.NFFT1/2+1) })
+	defer specFFTdstPool.put(dst)
 
 	n := len(x)
-	if n > NFFT1 {
-		n = NFFT1
+	if n > ft8params.NFFT1 {
+		n = ft8params.NFFT1
 	}
 	for i := 0; i < n; i++ {
 		buf[i] = float64(x[i])
 	}
-	for i := n; i < NFFT1; i++ {
+	for i := n; i < ft8params.NFFT1; i++ {
 		buf[i] = 0
 	}
-	fft := getFFT(NFFT1)
-	defer putFFT(NFFT1, fft)
+	fft := getFFT(ft8params.NFFT1)
+	defer putFFT(ft8params.NFFT1, fft)
 	spec := fft.Coefficients(dst, buf)
-	var pow [NH1]float64
-	for i := 1; i <= NH1; i++ {
+	var pow [ft8params.NH1]float64
+	for i := 1; i <= ft8params.NH1; i++ {
 		re := real(spec[i])
 		im := imag(spec[i])
 		pow[i-1] = re*re + im*im
@@ -68,11 +69,18 @@ func SpectrogramFFT3840(x []float32) [NH1]float64 {
 }
 
 // specFFTx64Pool reuses the float64 input buffer for SpectrogramFFT3840.
-var specFFTx64Pool = sync.Pool{New: func() interface{} { return make([]float64, NFFT1) }}
+var specFFTx64Pool = newFixedPool[[]float64](128)
 
 // specFFTdstPool reuses the complex128 output buffer for SpectrogramFFT3840.
 // A 3840-point real FFT produces 1921 complex coefficients.
-var specFFTdstPool = sync.Pool{New: func() interface{} { return make([]complex128, NFFT1/2+1) }}
+var specFFTdstPool = newFixedPool[[]complex128](128)
+
+func init() {
+	for i := 0; i < 64; i++ {
+		specFFTx64Pool.put(make([]float64, ft8params.NFFT1))
+		specFFTdstPool.put(make([]complex128, ft8params.NFFT1/2+1))
+	}
+}
 
 // FFT computes the forward complex-to-complex FFT (unnormalized).
 //

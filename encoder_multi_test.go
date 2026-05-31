@@ -7,10 +7,10 @@ import (
 func TestEncoderMultiFDMA(t *testing.T) {
 	msgs := []MessageFreq{
 		{Message: "CQ BH4GDF PM00", Freq: 1200},
-		{Message: "BH4GDF BH4ABC -10", Freq: 1800},
+		{Message: "BH4GDF BH4HKZ -10", Freq: 1800},
 	}
 
-	enc := NewEncoder()
+	enc := NewEncoder(WithSampleRate(12000), WithBitDepth(16))
 	waveform, err := enc.EncodeMulti(msgs)
 	if err != nil {
 		t.Fatalf("EncodeMulti failed: %v", err)
@@ -54,7 +54,7 @@ func TestEncoderMultiFDMA(t *testing.T) {
 }
 
 func TestEncoderMultiEmpty(t *testing.T) {
-	enc := NewEncoder()
+	enc := NewEncoder(WithSampleRate(12000), WithBitDepth(16))
 	_, err := enc.EncodeMulti(nil)
 	if err == nil {
 		t.Fatal("expected error for empty message list")

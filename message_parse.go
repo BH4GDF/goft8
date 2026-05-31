@@ -9,15 +9,24 @@ import (
 type MsgType int
 
 const (
-	MsgUnknown   MsgType = iota
-	MsgCQ                // "CQ [call] [grid]"
-	MsgStandard          // "CALL1 CALL2 GRID"
-	MsgReport            // "CALL1 CALL2 [-NN | R-NN | +NN | R+NN]"
-	MsgRRR               // "CALL1 CALL2 RRR"
-	MsgRR73              // "CALL1 CALL2 RR73"
-	Msg73                // "CALL1 CALL2 73"
-	MsgFreeText          // 13-character free text
-	MsgTelemetry         // 18-hex-character telemetry
+	// MsgUnknown means the message type could not be determined.
+	MsgUnknown MsgType = iota
+	// MsgCQ is a CQ call: "CQ [call] [grid]".
+	MsgCQ
+	// MsgStandard is a standard QSO message: "CALL1 CALL2 GRID".
+	MsgStandard
+	// MsgReport is a signal report: "CALL1 CALL2 [-NN | R-NN | +NN | R+NN]".
+	MsgReport
+	// MsgRRR is an RRR acknowledgement.
+	MsgRRR
+	// MsgRR73 is an RR73 signoff.
+	MsgRR73
+	// Msg73 is a 73 signoff.
+	Msg73
+	// MsgFreeText is a 13-character free-text message.
+	MsgFreeText
+	// MsgTelemetry is an 18-hex-character telemetry message.
+	MsgTelemetry
 )
 
 // Message holds the parsed fields of a decoded FT8 message.

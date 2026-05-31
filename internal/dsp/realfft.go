@@ -4,37 +4,41 @@
 // applies the "pack and unpack" trick (equivalent to FFTW's r2c) for
 // roughly 2× speedup over a naïve complex FFT of real data.
 
-package goft8
+package dsp
 
-import "sync"
-
-// realFFTBufPool caches float64 input buffers for RealFFT, keyed by size.
-// Only the hot-path sizes (192000 for downsampling, 3840 for spectrogram)
-// are pre-warmed.
-var realFFTBufPool sync.Map // int -> *sync.Pool{New: func() []float64 }
-
-func getRealFFTBuf(n int) []float64 {
-	if p, ok := realFFTBufPool.Load(n); ok {
-		return p.(*sync.Pool).Get().([]float64)
-	}
-	return make([]float64, n)
-}
-
-func putRealFFTBuf(n int, buf []float64) {
-	if p, ok := realFFTBufPool.Load(n); ok {
-		p.(*sync.Pool).Put(buf)
-	}
-}
+// realFFTBufPools caches float64 input buffers for RealFFT, keyed by size.
+var (
+	realFFTBufPool3840   = newFixedPool[[]float64](128)
+	realFFTBufPool192000 = newFixedPool[[]float64](128)
+)
 
 func init() {
 	// Pre-warm RealFFT buffers for hot-path sizes.
-	for _, n := range []int{3840, 192000} {
-		size := n
-		p := &sync.Pool{New: func() interface{} { return make([]float64, size) }}
-		for i := 0; i < 20; i++ {
-			p.Put(make([]float64, size))
-		}
-		realFFTBufPool.Store(size, p)
+	for i := 0; i < 64; i++ {
+		realFFTBufPool3840.put(make([]float64, 3840))
+		realFFTBufPool192000.put(make([]float64, 192000))
+	}
+}
+
+func getRealFFTBuf(n int) []float64 {
+	switch n {
+	case 3840:
+		buf := realFFTBufPool3840.get(func() []float64 { return make([]float64, 3840) })
+		return buf[:3840]
+	case 192000:
+		buf := realFFTBufPool192000.get(func() []float64 { return make([]float64, 192000) })
+		return buf[:192000]
+	default:
+		return make([]float64, n)
+	}
+}
+
+func putRealFFTBuf(n int, buf []float64) {
+	switch n {
+	case 3840:
+		realFFTBufPool3840.put(buf)
+	case 192000:
+		realFFTBufPool192000.put(buf)
 	}
 }
 

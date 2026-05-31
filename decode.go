@@ -1,13 +1,16 @@
-// decode.go — FT8 decode pipeline for the research package.
+// decode.go implements the FT8 decode pipeline.
 //
 // Port of subroutine ft8b from wsjt-wsjtx/lib/ft8/ft8b.f90
 // and the iterative loop from wsjt-wsjtx/lib/ft8_decode.f90 lines 160–239.
-//
-// Pure port — no production dependency.
 
 package goft8
 
 import (
+	"github.com/bh4gdf/goft8/internal/decode"
+	"github.com/bh4gdf/goft8/internal/encode"
+	"github.com/bh4gdf/goft8/internal/ldpc"
+	"github.com/bh4gdf/goft8/internal/protocol"
+	ft8params "github.com/bh4gdf/goft8/params"
 	"math"
 	"strings"
 	"sync"
@@ -52,6 +55,9 @@ type DecodeParams struct {
 	Interval int
 	// Workers enables goroutine concurrency. 0 = serial, >0 = parallel with that many workers.
 	Workers int
+	// OnCandidate is called synchronously each time a new signal is
+	// successfully decoded during iterative decoding. Keep it fast.
+	OnCandidate func(DecodeCandidate)
 }
 
 // DecodeCandidate is the result of decoding one FT8 signal candidate.
@@ -67,7 +73,7 @@ type DecodeCandidate struct {
 	// NHardErrors is the number of hard-decision bit errors after decoding.
 	NHardErrors int
 	// Tones holds the 79 channel tone indices (0–7) for subtracting the signal.
-	Tones [NN]int
+	Tones [ft8params.NN]int
 	// APType indicates the a-priori decoding type used (0 = no AP).
 	APType int
 	// Pass is the 1-based iterative-decode pass on which this signal was
@@ -76,8 +82,8 @@ type DecodeCandidate struct {
 }
 
 // CandidateFreq is a {frequency, DT} pair to try decoding.
-// Identical to Candidate from sync8.go.
-type CandidateFreq = Candidate
+// Identical to decode.Candidate from sync8.go.
+type CandidateFreq = decode.Candidate
 
 // DefaultDecodeParams returns sensible defaults matching WSJT-X ndepth=2.
 func DefaultDecodeParams() DecodeParams {
@@ -96,7 +102,7 @@ func DefaultDecodeParams() DecodeParams {
 // Port of subroutine ft8b from wsjt-wsjtx/lib/ft8/ft8b.f90.
 func DecodeSingle(
 	dd []float32,
-	ds *Downsampler,
+	ds *decode.Downsampler,
 	f1 float64,
 	xdt float64,
 	newdat bool,
@@ -109,7 +115,7 @@ func DecodeSingle(
 		ndepth = 2
 	}
 
-	// ── Step 1: Downsample to baseband (ft8b.f90 line 105) ──────────
+	// ── Step 1: decode.Downsample to baseband (ft8b.f90 line 105) ──────────
 	cd0 := ds.Downsample(dd, &newdat, f1)
 	maxMag := 0.0
 	for _, c := range cd0 {
@@ -120,12 +126,12 @@ func DecodeSingle(
 	}
 
 	// ── Step 2: DT search ±10 samples (ft8b.f90 lines 108–116) ─────
-	i0 := int(math.Round((xdt + 0.5) * Fs2)) // ft8b.f90 line 108: i0=nint((xdt+0.5)*fs2)
+	i0 := int(math.Round((xdt + 0.5) * ft8params.Fs2)) // ft8b.f90 line 108: i0=nint((xdt+0.5)*fs2)
 	var ctwk [32]complex128
 	smax := 0.0
 	ibest := 0
 	for idt := i0 - 10; idt <= i0+10; idt++ {
-		sync := Sync8d(cd0, idt, ctwk, 0)
+		sync := decode.Sync8d(cd0, idt, ctwk, 0)
 		if sync > smax {
 			smax = sync
 			ibest = idt
@@ -138,14 +144,14 @@ func DecodeSingle(
 	delfbest := 0.0
 	for ifr := -10; ifr <= 10; ifr++ {
 		delf := float64(ifr) * 0.25
-		dphi := twopi * delf * Dt2
+		dphi := twopi * delf * ft8params.Dt2
 		phi := 0.0
 		for i := 0; i < 32; i++ {
 			sin, cos := math.Sincos(phi)
 			ctwk[i] = complex(cos, sin)
 			phi += dphi
 		}
-		sync := Sync8d(cd0, ibest, ctwk, 1)
+		sync := decode.Sync8d(cd0, ibest, ctwk, 1)
 		if sync > smax {
 			smax = sync
 			delfbest = delf
@@ -154,7 +160,7 @@ func DecodeSingle(
 
 	// ── Step 4: Frequency refinement (ft8b.f90 lines 134–137) ───────
 	a := [5]float64{-delfbest, 0, 0, 0, 0}
-	TwkFreq1Into(cd0, cd0, Fs2, a)
+	decode.TwkFreq1Into(cd0, cd0, ft8params.Fs2, a)
 	f1 = f1 + delfbest
 
 	// ── Step 5: Re-downsample at refined frequency (ft8b.f90 line 140)
@@ -164,7 +170,7 @@ func DecodeSingle(
 	// ── Step 6: Final DT search ±4 samples (ft8b.f90 lines 143–152)
 	var ss [9]float64
 	for idt := -4; idt <= 4; idt++ {
-		ss[idt+4] = Sync8d(cd0, ibest+idt, ctwk, 0)
+		ss[idt+4] = decode.Sync8d(cd0, ibest+idt, ctwk, 0)
 	}
 	smax = ss[0]
 	imax := 0
@@ -175,15 +181,15 @@ func DecodeSingle(
 		}
 	}
 	ibest = imax - 4 + ibest
-	xdt = float64(ibest-1) * Dt2
+	xdt = float64(ibest-1) * ft8params.Dt2
 
 	// ── Step 7: Symbol spectra (ft8b.f90 lines 154–161) ─────────────
-	cs, s8 := ComputeSymbolSpectra(cd0, ibest)
+	cs, s8 := decode.ComputeSymbolSpectra(cd0, ibest)
 
 	// ── Step 8: Hard sync check (ft8b.f90 lines 163–180) ────────────
 	// MSHV: syncmin=8 when ndepth<=2, syncmin=6 otherwise.
 	// imetric parameter is reserved for future bit-metric variants (currently no-op).
-	nsync := HardSync(&s8)
+	nsync := decode.HardSync(&s8)
 	hsyncMin := 6
 	if ndepth <= 2 {
 		hsyncMin = 8
@@ -195,13 +201,13 @@ func DecodeSingle(
 
 	// ── Step 9: Soft metrics (ft8b.f90 lines 182–239) ───────────────
 	// MSHV: 5 metric sets including bmete (best of a/b/c per position).
-	bmeta, bmetb, bmetc, bmetd, bmete := ComputeSoftMetrics(&cs)
+	bmeta, bmetb, bmetc, bmetd, bmete := decode.ComputeSoftMetrics(&cs)
 
 	// Fortran: real llr(174), scalefac — multiply in float32 precision to
-	// match. DecodeLDPC re-truncates at entry for all other call sites.
-	var llra, llrb, llrc, llrd, llre [LDPCn]float64
-	sf32 := float32(ScaleFac)
-	for i := 0; i < LDPCn; i++ {
+	// match. ldpc.DecodeLDPC re-truncates at entry for all other call sites.
+	var llra, llrb, llrc, llrd, llre [ft8params.LDPCn]float64
+	sf32 := float32(ft8params.ScaleFac)
+	for i := 0; i < ft8params.LDPCn; i++ {
 		llra[i] = float64(sf32 * float32(bmeta[i]))
 		llrb[i] = float64(sf32 * float32(bmetb[i]))
 		llrc[i] = float64(sf32 * float32(bmetc[i]))
@@ -211,7 +217,7 @@ func DecodeSingle(
 
 	// apmag = max(|llra|) * 1.1 (MSHV uses 1.1, WSJT-X uses 1.01)
 	apmag := 0.0
-	for i := 0; i < LDPCn; i++ {
+	for i := 0; i < ft8params.LDPCn; i++ {
 		if v := math.Abs(llra[i]); v > apmag {
 			apmag = v
 		}
@@ -220,7 +226,7 @@ func DecodeSingle(
 
 	// ── Step 10: Decode passes (ft8b.f90 lines 254–462) ─────────────
 	// Compute AP symbols from callsigns (ft8apset.f90)
-	apsym := ComputeAPSymbols(params.MyCall, params.DxCall)
+	apsym := decode.ComputeAPSymbols(params.MyCall, params.DxCall)
 
 	// Pass count: 5 regular + AP passes (MSHV ws300rc1 adds pass 5 with llre).
 	// AP passes use llra/llrc alternating, up to 4 AP passes (9 total).
@@ -233,13 +239,13 @@ func DecodeSingle(
 			if qsoProg < 0 || qsoProg > 5 {
 				qsoProg = 0
 			}
-			npasses = 5 + nappasses_2[qsoProg]
+			npasses = 5 + decode.Nappasses2[qsoProg]
 		}
 	}
 
 	for ipass := 1; ipass <= npasses; ipass++ {
 		// Select LLR set (ft8b.f90 lines 266–269 + MSHV pass 5 + MSHV AP alternation)
-		var llrz [LDPCn]float64
+		var llrz [ft8params.LDPCn]float64
 		switch ipass {
 		case 1:
 			llrz = llra
@@ -261,7 +267,7 @@ func DecodeSingle(
 			}
 		}
 
-		var apmask [LDPCn]int8
+		var apmask [ft8params.LDPCn]int8
 		iaptype := 0
 
 		// AP injection (ft8b.f90 lines 274–401, MSHV ws300rc1)
@@ -275,7 +281,7 @@ func DecodeSingle(
 				}
 				apIdx := (ipass - 6) / 2
 				if apIdx < 4 {
-					iaptype = naptypes_2[qsoProg][apIdx]
+					iaptype = decode.Naptypes2[qsoProg][apIdx]
 				}
 				if iaptype == 0 {
 					continue
@@ -297,7 +303,7 @@ func DecodeSingle(
 			}
 
 			// Apply AP (contestType 0=standard, 2=EU VHF, 3=Field Day, 4=RTTY RU)
-			ApplyAP(&llrz, &apmask, iaptype, apsym, apmag, params.ContestType)
+			decode.ApplyAP(&llrz, &apmask, iaptype, apsym, apmag, params.ContestType)
 		}
 
 		// OSD depth control (ft8b.f90 lines 403–412)
@@ -315,12 +321,12 @@ func DecodeSingle(
 		// ndepth >= 3: maxosd stays at 2 (default)
 
 		// LDPC decode (ft8b.f90 lines 413–418)
-		var result DecodeResult
+		var result ldpc.DecodeResult
 		var ok bool
 		if params.UseF32LDPC {
-			result, ok = DecodeLDPCF32(llrz, LDPCk, maxosd, norder, apmask)
+			result, ok = ldpc.DecodeLDPCF32(llrz, ft8params.LDPCk, maxosd, norder, apmask)
 		} else {
-			result, ok = DecodeLDPC(llrz, LDPCk, maxosd, norder, apmask)
+			result, ok = ldpc.DecodeLDPC(llrz, ft8params.LDPCk, maxosd, norder, apmask)
 		}
 		if !ok {
 			continue
@@ -344,7 +350,7 @@ func DecodeSingle(
 		// Extract message bits and validate (i3, n3) (ft8b.f90 lines 424–428)
 		var msgBits [77]int8
 		copy(msgBits[:], result.Message91[:77])
-		c77 := BitsToC77(msgBits)
+		c77 := protocol.BitsToC77(msgBits)
 
 		// Parse i3 and n3 from bit positions 72–77 (ft8b.f90 lines 425–428)
 		n3 := int(c77[71]-'0')<<2 | int(c77[72]-'0')<<1 | int(c77[73]-'0')
@@ -357,21 +363,30 @@ func DecodeSingle(
 		}
 
 		// Unpack message (ft8b.f90 line 429)
-		msg, unpkOK := Unpack77(c77)
+		msg, unpkOK := protocol.Unpack77(c77)
 		if !unpkOK {
 			continue
 		}
 
 		// Generate tones for subtraction/SNR (ft8b.f90 line 432)
-		itone := GenFT8Tones(msgBits)
+		itone := encode.GenFT8Tones(msgBits)
 
 		// SNR estimation using spectrum baseline (ft8b.f90 / MSHV)
 		xsig := 0.0
-		for i := 0; i < NN; i++ {
+		for i := 0; i < ft8params.NN; i++ {
 			s88 := s8[itone[i]][i] * 0.001
 			xsig += s88 * s88
 		}
-		xsnr := 10.0*math.Log10(xsig/xbase-1.0) - 36.0
+		// Natural alignment with MSHV: input scaling, downsample input,
+		// and sync8d correlation now match MSHV's scaling chain.
+		// No empirical calibration factor needed.
+		xbaseCal := xbase
+		ratio := xsig/xbaseCal - 1.0
+		// Protect against NaN/negative like MSHV's db() (arg ≤ 1.259e-10 → -99 dB)
+		if ratio <= 1.259e-10 {
+			ratio = 1.259e-10
+		}
+		xsnr := 10.0*math.Log10(ratio) - 36.0
 		if nsync <= 10 && xsnr < -25.0 {
 			return DecodeCandidate{}, false
 		}
@@ -403,7 +418,7 @@ type IntervalState struct {
 }
 
 type intervalDecode struct {
-	tones [NN]int
+	tones [ft8params.NN]int
 	freq  float64
 	dt    float64
 }
@@ -427,7 +442,7 @@ func DecodeInterval(audio []float32, interval int, state *IntervalState, params 
 		}
 		for _, d := range state.decodes {
 			if d.dt-0.5 < 0.396 {
-				SubtractFT8(dd, d.tones, d.freq, d.dt)
+				decode.SubtractFT8(dd, d.tones, d.freq, d.dt)
 			}
 		}
 		state = &IntervalState{decodes: state.decodes}
@@ -442,7 +457,7 @@ func DecodeInterval(audio []float32, interval int, state *IntervalState, params 
 		}
 		copy(dd, state.dd)
 		for _, d := range state.decodes {
-			SubtractFT8(dd, d.tones, d.freq, d.dt)
+			decode.SubtractFT8(dd, d.tones, d.freq, d.dt)
 		}
 	}
 
@@ -487,10 +502,10 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 	}
 
 	// Work on a copy so subtraction doesn't modify the caller's audio.
-	var ddArr [NMAX]float32
+	var ddArr [ft8params.NMAX]float32
 	n := len(audio)
-	if n > NMAX {
-		n = NMAX
+	if n > ft8params.NMAX {
+		n = ft8params.NMAX
 	}
 	copy(ddArr[:n], audio[:n])
 	dd := ddArr[:]
@@ -531,11 +546,11 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 		}
 
 		// Resolve effective worker count once per pass.
-		nw := numWorkers(params.Workers)
+		nw := decode.NumWorkers(params.Workers)
 
-		// Sync8 candidate search (ft8_decode.f90 lines 193–195)
+		// decode.Sync8 candidate search (ft8_decode.f90 lines 193–195)
 		maxcand := 600
-		candidates, sbase := Sync8(ddArr, NMAX, nfa, nfb, syncmin, 0, maxcand, nw)
+		candidates, sbase := decode.Sync8(ddArr, ft8params.NMAX, nfa, nfb, syncmin, 0, maxcand, nw)
 
 		metric := 1
 		if ipass >= 1 {
@@ -553,6 +568,7 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 			Metric:      metric,
 			ContestType: params.ContestType,
 			Interval:    params.Interval,
+			OnCandidate: params.OnCandidate,
 		}
 
 		passDecodes := 0
@@ -560,7 +576,7 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 			// Parallel path: worker pool. dd is read-only in DecodeSingle,
 			// so workers share it directly without copying.
 			type decodeJob struct {
-				cand  Candidate
+				cand  decode.Candidate
 				xbase float64
 				idx   int
 			}
@@ -578,7 +594,7 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					ds := NewDownsampler()
+					ds := decode.NewDownsampler()
 					first := true
 					for job := range jobs {
 						newdat := first
@@ -601,8 +617,8 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 				if freqBin < 0 {
 					freqBin = 0
 				}
-				if freqBin >= NH1 {
-					freqBin = NH1 - 1
+				if freqBin >= ft8params.NH1 {
+					freqBin = ft8params.NH1 - 1
 				}
 				xbase := math.Pow(10.0, 0.1*(sbase[freqBin]-40.0))
 				jobs <- decodeJob{cand: cand, xbase: xbase, idx: i}
@@ -610,7 +626,7 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 			close(jobs)
 			wg.Wait()
 
-			var toSubtract []SubtractSignal
+			var toSubtract []decode.SubtractSignal
 			for i := range candidates {
 				dr := decoded[i]
 				if !dr.ok {
@@ -628,11 +644,14 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 				ndecodes++
 				passDecodes++
 				result.Pass = ipass + 1
+				if passParams.OnCandidate != nil {
+					passParams.OnCandidate(result)
+				}
 				results = append(results, result)
 
 				// Collect signal for batch subtraction at end of pass.
 				// (All DecodeSingle calls in this pass already ran on the same dd.)
-				toSubtract = append(toSubtract, SubtractSignal{
+				toSubtract = append(toSubtract, decode.SubtractSignal{
 					Tones: result.Tones,
 					Freq:  result.Freq,
 					DT:    result.DT + 0.5,
@@ -641,21 +660,23 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 
 			// Batch subtract all decoded signals from this pass.
 			for _, sig := range toSubtract {
-				SubtractFT8(dd, sig.Tones, sig.Freq, sig.DT)
+				decode.SubtractFT8(dd, sig.Tones, sig.Freq, sig.DT)
 			}
 		} else {
 			// Serial path
+			ds := decode.NewDownsampler()
+			first := true
 			for _, cand := range candidates {
-				ds := NewDownsampler()
-				newdat := true
+				newdat := first
+				first = false
 
 				// Compute xbase from spectrum baseline for this candidate frequency.
 				freqBin := int(math.Round(cand.Freq / 3.125))
 				if freqBin < 0 {
 					freqBin = 0
 				}
-				if freqBin >= NH1 {
-					freqBin = NH1 - 1
+				if freqBin >= ft8params.NH1 {
+					freqBin = ft8params.NH1 - 1
 				}
 				xbase := math.Pow(10.0, 0.1*(sbase[freqBin]-40.0))
 
@@ -676,11 +697,14 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 				ndecodes++
 				passDecodes++
 				result.Pass = ipass + 1
+				if passParams.OnCandidate != nil {
+					passParams.OnCandidate(result)
+				}
 				results = append(results, result)
 
 				// Subtract decoded signal (ft8_decode.f90 line ~207 via ft8b line 435)
 				// Use unadjusted DT for subtraction (result.DT has been adjusted, add 0.5 back)
-				SubtractFT8(dd, result.Tones, result.Freq, result.DT+0.5)
+				decode.SubtractFT8(dd, result.Tones, result.Freq, result.DT+0.5)
 			}
 		}
 
@@ -690,19 +714,19 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 	return results
 }
 
-// ── Sync8FindCandidates ─────────────────────────────────────────────────────
+// ── decode.Sync8FindCandidates ─────────────────────────────────────────────────────
 
-// Sync8FindCandidates searches for potential FT8 signals using the
+// decode.Sync8FindCandidates searches for potential FT8 signals using the
 // spectrogram-based sync8 algorithm.
 //
-// Wrapper around the research Sync8() function.
+// Wrapper around the research decode.Sync8() function.
 func Sync8FindCandidates(audio []float32, freqMin, freqMax int, syncmin float64, nfqso, maxcand int, workers int) []CandidateFreq {
-	var dd [NMAX]float32
+	var dd [ft8params.NMAX]float32
 	n := len(audio)
-	if n > NMAX {
-		n = NMAX
+	if n > ft8params.NMAX {
+		n = ft8params.NMAX
 	}
 	copy(dd[:n], audio[:n])
-	cands, _ := Sync8(dd, n, freqMin, freqMax, syncmin, nfqso, maxcand, workers)
+	cands, _ := decode.Sync8(dd, n, freqMin, freqMax, syncmin, nfqso, maxcand, workers)
 	return cands
 }

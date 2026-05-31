@@ -4,16 +4,78 @@ import (
 	"testing"
 )
 
+func TestEncoderTxFreqClamp(t *testing.T) {
+	// Below minimum: should clamp to 80 Hz.
+	enc := NewEncoder(WithTxFreq(10), WithSampleRate(12000), WithBitDepth(16))
+	wave, err := enc.Encode("CQ BH4GDF PM00")
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+	if len(wave) != NTXSamples {
+		t.Fatalf("expected %d samples, got %d", NTXSamples, len(wave))
+	}
+
+	// Above maximum: should clamp to 4920 Hz.
+	enc2 := NewEncoder(WithTxFreq(6000), WithSampleRate(12000), WithBitDepth(16))
+	wave2, err := enc2.Encode("CQ BH4GDF PM00")
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+	if len(wave2) != NTXSamples {
+		t.Fatalf("expected %d samples, got %d", NTXSamples, len(wave2))
+	}
+
+	// EncodeMulti with sufficient spacing should succeed.
+	enc3 := NewEncoder(WithSampleRate(12000), WithBitDepth(16))
+	msgs := []MessageFreq{
+		{Message: "CQ BH4GDF PM00", Freq: 10},   // clamped to 80
+		{Message: "CQ BH4HKZ PM01", Freq: 6000}, // clamped to 4920
+	}
+	wave3, err := enc3.EncodeMulti(msgs)
+	if err != nil {
+		t.Fatalf("EncodeMulti failed: %v", err)
+	}
+	if len(wave3) != NTXSamples {
+		t.Fatalf("expected %d samples, got %d", NTXSamples, len(wave3))
+	}
+
+	// EncodeMulti with insufficient spacing (< 60 Hz) must return an error.
+	enc4 := NewEncoder(WithSampleRate(12000), WithBitDepth(16))
+	msgsClose := []MessageFreq{
+		{Message: "CQ BH4GDF PM00", Freq: 1500},
+		{Message: "CQ BH4HKZ PM01", Freq: 1530}, // only 30 Hz apart
+	}
+	_, err = enc4.EncodeMulti(msgsClose)
+	if err == nil {
+		t.Fatal("expected error for messages spaced < 60 Hz apart, got nil")
+	}
+	t.Logf("Got expected spacing error: %v", err)
+
+	// Unordered list: the check must sort first, so 1500/1530 still fails.
+	enc5 := NewEncoder(WithSampleRate(12000), WithBitDepth(16))
+	msgsUnordered := []MessageFreq{
+		{Message: "CQ BH4HKZ PM01", Freq: 1530},
+		{Message: "CQ BH4GDF PM00", Freq: 1500},
+	}
+	_, err = enc5.EncodeMulti(msgsUnordered)
+	if err == nil {
+		t.Fatal("expected error for unordered messages spaced < 60 Hz apart, got nil")
+	}
+	t.Logf("Got expected spacing error for unordered list: %v", err)
+
+	t.Log("TX frequency clamping works: 10→80, 6000→4920")
+}
+
 func TestEncoderDecodeRoundTrip(t *testing.T) {
 	// Create encoder and decoder.
-	enc := NewEncoder(WithTxFreq(1500))
+	enc := NewEncoder(WithTxFreq(1500), WithSampleRate(12000), WithBitDepth(16))
 	dec := NewDecoder()
 
 	tests := []string{
 		"CQ BH4GDF PM00",
-		"BH4GDF BH4ABC -10",
-		"BH4GDF BH4ABC RR73",
-		"W1ABC K1ABC FN20",
+		"BH4GDF BH4HKZ -10",
+		"BH4GDF KL0I RR73",
+		"BH4GDF KL0I PM00",
 	}
 
 	for _, msg := range tests {

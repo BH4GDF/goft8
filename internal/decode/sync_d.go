@@ -1,11 +1,12 @@
-// sync_d.go — Fine time/frequency sync for the research package.
+// sync_d.go implements fine time/frequency sync (Sync8d).
 //
 // Port of subroutine sync8d from wsjt-wsjtx/lib/ft8/sync8d.f90
 // and the nsync computation from wsjt-wsjtx/lib/ft8/ft8b.f90 lines 163–176.
 
-package goft8
+package decode
 
 import (
+	ft8params "github.com/bh4gdf/goft8/params"
 	"math"
 	"sync"
 )
@@ -34,7 +35,7 @@ func initCSync() {
 		twopi := 8.0 * math.Atan(1.0)
 		for i := 0; i <= 6; i++ {
 			phi := 0.0
-			dphi := twopi * float64(Icos7[i]) / 32.0
+			dphi := twopi * float64(ft8params.Icos7[i]) / 32.0
 			for j := 0; j < 32; j++ {
 				csync[i][j] = complex(math.Cos(phi), math.Sin(phi))
 				phi += dphi
@@ -96,26 +97,30 @@ func Sync8d(cd0 []complex128, i0 int, ctwk [32]complex128, itwk int) float64 {
 		// conjg in Fortran = complex conjugate.
 		var z1, z2, z3 complex128
 
-		if i1 >= 0 && i1+31 <= NP2-1 {
+		if i1 >= 0 && i1+31 <= ft8params.NP2-1 {
 			for j := 0; j < 32; j++ {
 				// cd0(i1+j) * conjg(csync2(j))
 				c := csync2[j]
 				z1 += cd0[i1+j] * complex(real(c), -imag(c))
 			}
 		}
-		if i2 >= 0 && i2+31 <= NP2-1 {
+		if i2 >= 0 && i2+31 <= ft8params.NP2-1 {
 			for j := 0; j < 32; j++ {
 				c := csync2[j]
 				z2 += cd0[i2+j] * complex(real(c), -imag(c))
 			}
 		}
-		if i3 >= 0 && i3+31 <= NP2-1 {
+		if i3 >= 0 && i3+31 <= ft8params.NP2-1 {
 			for j := 0; j < 32; j++ {
 				c := csync2[j]
 				z3 += cd0[i3+j] * complex(real(c), -imag(c))
 			}
 		}
 
+		// Match MSHV sync8d: z *= 0.01 before computing power.
+		z1 *= 0.01
+		z2 *= 0.01
+		z3 *= 0.01
 		syncPower += p(z1) + p(z2) + p(z3)
 	}
 	return syncPower
@@ -144,7 +149,7 @@ func Sync8d(cd0 []complex128, i0 int, ctwk [32]complex128, itwk int) float64 {
 // Fortran k=1..7 with s8(:,k) → Go symbol index k-1 = 0..6.
 // Fortran s8(:,k+36) → Go symbol index k-1+36 = 36..42.
 // Fortran s8(:,k+72) → Go symbol index k-1+72 = 72..78.
-func HardSync(s8 *[8][NN]float64) int {
+func HardSync(s8 *[8][ft8params.NN]float64) int {
 	is1 := 0
 	is2 := 0
 	is3 := 0
@@ -159,13 +164,13 @@ func HardSync(s8 *[8][NN]float64) int {
 		// Fortran: if(icos7(k-1).eq.(ip(1)-1))
 		// ip(1) is 1-based, so ip(1)-1 is 0-based tone index.
 		// Our argmax is already 0-based.
-		if argmax8(s8, sym1) == Icos7[k-1] {
+		if argmax8(s8, sym1) == ft8params.Icos7[k-1] {
 			is1++
 		}
-		if argmax8(s8, sym2) == Icos7[k-1] {
+		if argmax8(s8, sym2) == ft8params.Icos7[k-1] {
 			is2++
 		}
-		if argmax8(s8, sym3) == Icos7[k-1] {
+		if argmax8(s8, sym3) == ft8params.Icos7[k-1] {
 			is3++
 		}
 	}
@@ -174,7 +179,7 @@ func HardSync(s8 *[8][NN]float64) int {
 }
 
 // argmax8 returns the tone index (0..7) with the largest value at the given symbol.
-func argmax8(s8 *[8][NN]float64, sym int) int {
+func argmax8(s8 *[8][ft8params.NN]float64, sym int) int {
 	best := 0
 	for t := 1; t < 8; t++ {
 		if s8[t][sym] > s8[best][sym] {

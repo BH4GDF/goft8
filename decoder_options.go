@@ -29,7 +29,7 @@ type decoderConfig struct {
 
 func defaultDecoderConfig() decoderConfig {
 	return decoderConfig{
-		freqMin:           200,
+		freqMin:           100,
 		freqMax:           3000,
 		depth:             DepthNormal,
 		maxPasses:         3,

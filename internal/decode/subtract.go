@@ -1,12 +1,13 @@
-// subtract.go — Signal subtraction for the research package.
+// subtract.go implements decoded-signal subtraction for iterative decoding.
 //
 // Port of subroutine subtractft8 from wsjt-wsjtx/lib/ft8/subtractft8.f90.
-//
-// Pure port — no production dependency.
 
-package goft8
+package decode
 
 import (
+	"github.com/bh4gdf/goft8/internal/dsp"
+	"github.com/bh4gdf/goft8/internal/encode"
+	ft8params "github.com/bh4gdf/goft8/params"
 	"math"
 	"math/cmplx"
 	"sync"
@@ -16,11 +17,10 @@ const subtractNFILT = 4000
 
 // SubtractSignal holds parameters for subtracting one decoded signal.
 type SubtractSignal struct {
-	Tones [NN]int
+	Tones [ft8params.NN]int
 	Freq  float64
 	DT    float64 // unadjusted DT (before the -0.5 display adjustment)
 }
-
 
 var (
 	subtractOnce          sync.Once
@@ -37,9 +37,9 @@ var (
 // for the filter transient at the edges of the frame.
 //
 // Normalization note: the Fortran applies fac=1/N after the forward FFT
-// because four2a is unnormalized in both directions. Our FFT() is also
-// unnormalized, but IFFT() normalizes by 1/N. To get the correct convolution
-// result from IFFT(FFT(signal) * filter), we must NOT divide the filter by N.
+// because four2a is unnormalized in both directions. Our dsp.FFT() is also
+// unnormalized, but dsp.IFFT() normalizes by 1/N. To get the correct convolution
+// result from dsp.IFFT(dsp.FFT(signal) * filter), we must NOT divide the filter by N.
 func initSubtractFilter() {
 	subtractOnce.Do(func() {
 		halfFilt := subtractNFILT / 2 // 2000
@@ -57,14 +57,14 @@ func initSubtractFilter() {
 
 		// Place normalized window into complex array of length NMAX,
 		// then circular-shift by NFILT/2+1.
-		cw := make([]complex128, NMAX)
+		cw := make([]complex128, ft8params.NMAX)
 		for i := 0; i < windowLen; i++ {
 			cw[i] = complex(window[i]/sumw, 0)
 		}
-		cw = cshift(cw, halfFilt+1)
+		cw = Cshift(cw, halfFilt+1)
 
 		// Forward FFT (unnormalized).
-		subtractFilterFreq = FFT(cw)
+		subtractFilterFreq = dsp.FFT(cw)
 
 		// Precompute end-correction factors.
 		// endcorrection[j] = 1 / (1 - sum(window[j-1:halfFilt]) / sumw)
@@ -83,14 +83,14 @@ func initSubtractFilter() {
 // cwavePool reuses the NFRAME-length complex reference waveforms.
 var cwavePool = sync.Pool{
 	New: func() interface{} {
-		return make([]complex128, NFRAME)
+		return make([]complex128, ft8params.NFRAME)
 	},
 }
 
 // cfiltPool reuses the NMAX-length complex buffers for SubtractFT8.
 var cfiltPool = sync.Pool{
 	New: func() interface{} {
-		return make([]complex128, NMAX)
+		return make([]complex128, ft8params.NMAX)
 	},
 }
 
@@ -99,7 +99,7 @@ var cfiltPool = sync.Pool{
 //
 // Port of subroutine subtractft8 from wsjt-wsjtx/lib/ft8/subtractft8.f90
 // (lrefinedt=.false. path).
-func SubtractFT8(dd []float32, itone [NN]int, f0, xdt float64) {
+func SubtractFT8(dd []float32, itone [ft8params.NN]int, f0, xdt float64) {
 	initSubtractFilter()
 
 	halfFilt := subtractNFILT / 2
@@ -110,23 +110,23 @@ func SubtractFT8(dd []float32, itone [NN]int, f0, xdt float64) {
 	copyCWave(cref, itone, f0)
 
 	// Compute starting sample index.
-	nstart := int(xdt*Fs) + 1 // Fortran: nstart = dt*12000 + 1
+	nstart := int(xdt*ft8params.Fs) + 1 // Fortran: nstart = dt*12000 + 1
 
 	// Conjugate-multiply: camp[i] = dd[nstart-1+i] * conj(cref[i])
 	cfilt := cfiltPool.Get().([]complex128)
-	for i := 0; i < NMAX; i++ {
+	for i := 0; i < ft8params.NMAX; i++ {
 		cfilt[i] = 0
 	}
-	for i := 0; i < NFRAME; i++ {
+	for i := 0; i < ft8params.NFRAME; i++ {
 		j := nstart - 1 + i // 0-based index into dd
-		if j >= 0 && j < NMAX {
+		if j >= 0 && j < ft8params.NMAX {
 			cfilt[i] = complex(float64(dd[j]), 0) * cmplx.Conj(cref[i])
 		}
 	}
 	// cfilt[NFRAME:] is already zero.
 
 	// Forward FFT (in-place).
-	FFTInto(cfilt, cfilt)
+	dsp.FFTInto(cfilt, cfilt)
 
 	// Multiply by filter in frequency domain.
 	for i := range cfilt {
@@ -134,21 +134,21 @@ func SubtractFT8(dd []float32, itone [NN]int, f0, xdt float64) {
 	}
 
 	// Inverse FFT (in-place).
-	IFFTInto(cfilt, cfilt)
+	dsp.IFFTInto(cfilt, cfilt)
 
 	// Apply end-correction to compensate for filter transients.
 	for j := 0; j <= halfFilt; j++ {
 		cfilt[j] *= complex(subtractEndCorrection[j], 0)
 	}
 	for j := 0; j <= halfFilt; j++ {
-		idx := NFRAME - 1 - j
+		idx := ft8params.NFRAME - 1 - j
 		cfilt[idx] *= complex(subtractEndCorrection[j], 0)
 	}
 
 	// Subtract the reconstructed signal.
-	for i := 0; i < NFRAME; i++ {
+	for i := 0; i < ft8params.NFRAME; i++ {
 		j := nstart - 1 + i
-		if j >= 0 && j < NMAX {
+		if j >= 0 && j < ft8params.NMAX {
 			z := cfilt[i] * complex(real(cref[i]), imag(cref[i]))
 			dd[j] -= 2.0 * float32(real(z))
 		}
@@ -158,25 +158,25 @@ func SubtractFT8(dd []float32, itone [NN]int, f0, xdt float64) {
 
 // copyCWave fills dst with the complex GFSK reference waveform.
 // dst must have length >= NFRAME.
-func copyCWave(dst []complex128, itone [NN]int, f0 float64) {
+func copyCWave(dst []complex128, itone [ft8params.NN]int, f0 float64) {
 	// Reuse the shared dphi computation.
-	dphi := genFT8DPhi(itone, f0)
+	dphi := encode.GenFT8DPhi(itone, f0, ft8params.Fs)
 
 	phi := 0.0
-	for k := 0; k < NFRAME; k++ {
-		j := NSPS + k
+	for k := 0; k < ft8params.NFRAME; k++ {
+		j := ft8params.NSPS + k
 		sin, cos := math.Sincos(phi)
 		dst[k] = complex(cos, sin)
 		phi += dphi[j]
 	}
 
 	// Envelope shaping.
-	nramp := NSPS / 8
+	nramp := ft8params.NSPS / 8
 	for i := 0; i < nramp; i++ {
 		ramp := (1.0 - math.Cos(2.0*math.Pi*float64(i)/float64(2*nramp))) / 2.0
 		dst[i] = complex(real(dst[i])*ramp, imag(dst[i])*ramp)
 	}
-	k1 := NN*NSPS - nramp
+	k1 := ft8params.NN*ft8params.NSPS - nramp
 	for i := 0; i < nramp; i++ {
 		ramp := (1.0 + math.Cos(2.0*math.Pi*float64(i)/float64(2*nramp))) / 2.0
 		dst[k1+i] = complex(real(dst[k1+i])*ramp, imag(dst[k1+i])*ramp)
@@ -215,27 +215,27 @@ func BatchSubtractFT8(dd []float32, signals []SubtractSignal) {
 		go func(idx int, sig SubtractSignal) {
 			defer wg.Done()
 
-			cref := GenFT8CWave(sig.Tones, sig.Freq)
-			nstart := int(sig.DT*Fs) + 1
+			cref := encode.GenFT8CWave(sig.Tones, sig.Freq)
+			nstart := int(sig.DT*ft8params.Fs) + 1
 
-			cfilt := make([]complex128, NMAX)
+			cfilt := make([]complex128, ft8params.NMAX)
 
-			for j := 0; j < NFRAME; j++ {
+			for j := 0; j < ft8params.NFRAME; j++ {
 				k := nstart - 1 + j
-				if k >= 0 && k < NMAX {
+				if k >= 0 && k < ft8params.NMAX {
 					cfilt[j] = complex(float64(dd[k]), 0) * cmplx.Conj(cref[j])
 				}
 			}
 
-			cfilt = FFT(cfilt)
+			cfilt = dsp.FFT(cfilt)
 			for j := range cfilt {
 				cfilt[j] *= subtractFilterFreq[j]
 			}
-			cfilt = IFFT(cfilt)
+			cfilt = dsp.IFFT(cfilt)
 
 			for j := 0; j <= halfFilt; j++ {
 				cfilt[j] *= complex(subtractEndCorrection[j], 0)
-				idx2 := NFRAME - 1 - j
+				idx2 := ft8params.NFRAME - 1 - j
 				cfilt[idx2] *= complex(subtractEndCorrection[j], 0)
 			}
 
@@ -247,9 +247,9 @@ func BatchSubtractFT8(dd []float32, signals []SubtractSignal) {
 
 	// Serial subtract to avoid races on dd.
 	for _, r := range results {
-		for i := 0; i < NFRAME; i++ {
+		for i := 0; i < ft8params.NFRAME; i++ {
 			j := r.nstart - 1 + i
-			if j >= 0 && j < NMAX {
+			if j >= 0 && j < ft8params.NMAX {
 				z := r.cfilt[i] * complex(real(r.cref[i]), imag(r.cref[i]))
 				dd[j] -= 2.0 * float32(real(z))
 			}

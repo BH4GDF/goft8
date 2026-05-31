@@ -5,12 +5,15 @@ A Go implementation of the FT8 digital mode encoder and decoder.
 ## Features
 
 - **Decoder**: Full FT8 decode pipeline (sync8, LDPC BP+OSD, CRC, message unpack)
-  ported from WSJT-X 2.7.0 algorithms.
+  ported from WSJT-X 2.7.0 algorithms, with behavioural alignment to
+  [MSHV](https://www.mshv.org/) v2.76 for SNR calibration, frequency limits,
+  and decode parameters.
 - **Encoder**: Full message packing matching MSHV priority order:
   - Standard messages (CQ, grid, reports, RRR/RR73/73, /R /P suffixes)
   - DXpedition, ARRL Field Day, ARRL RTTY Contest, EU VHF Contest
   - Non-standard callsigns, Telemetry, Free text
   - CRC-14, LDPC (174,91), GFSK tone generation, waveform synthesis
+  - Configurable output sample rate (12 kHz / 48 kHz) and bit depth (16/24/32-bit)
 - **Pure Go**: No CGO dependencies. Works on any Go-supported platform.
 
 ## Installation
@@ -33,9 +36,9 @@ import (
 )
 
 func main() {
-    decodes, err := DecodeWAV("ft8_cap1.wav",
-        WithDepth(DepthDeep),
-        WithMyCall("W1ABC"),
+    decodes, err := goft8.DecodeWAV("ft8_cap1.wav",
+        goft8.WithDepth(goft8.DepthDeep),
+        goft8.WithMyCall("W1ABC"),
     )
     if err != nil {
         log.Fatal(err)
@@ -57,33 +60,48 @@ import (
 )
 
 func main() {
-    enc := NewEncoder(WithTxFreq(1500))
+    enc := goft8.NewEncoder(goft8.WithTxFreq(1500))
     waveform, err := enc.Encode("CQ W1ABC FN20")
     if err != nil {
         log.Fatal(err)
     }
-    // waveform is []float32 at 12 kHz mono, length NTXSamples (151680)
+    // waveform is []float32 at the configured sample rate (default 48 kHz)
 }
 ```
 
 ## Architecture
 
+The public API is intentionally thin—only `Decoder`, `Encoder`, `Decoded`,
+`Message`, and a few facade helpers live in the root package. All algorithmic
+detail is hidden under `internal/`:
+
 ```
 goft8/
-├── *.go               # FT8 core implementation
-│   ├── decoder.go     # Public Decoder API
-│   ├── encoder.go     # Public Encoder API
-│   ├── pack77.go      # Message packing
-│   ├── unpack77.go    # Message unpacking
-│   ├── encode.go      # Tone & waveform generation
-│   ├── decode.go      # Decode pipeline
-│   ├── ldpc.go        # LDPC BP+OSD decoder
-│   ├── crc.go         # CRC-14
-│   ├── sync8.go       # Costas sync search
-│   ├── fft.go         # Pure-Go mixed-radix FFT
-│   └── ...
-└── testdata/          # Test WAV captures
+├── params/              # FT8 algorithm constants (Fs, NN, NSPS, LDPC params, Gray map)
+├── internal/
+│   ├── dsp/             # FFT / IFFT / RealFFT utilities (pure-Go + gonum)
+│   ├── ldpc/            # LDPC (174,91) encoder/decoder + CRC-14
+│   ├── decode/          # Decode pipeline (downsample, sync8, sync_d, metrics, AP, subtract)
+│   ├── encode/          # Tone generation and GFSK waveform synthesis
+│   └── protocol/        # Message packing/unpacking (pack77, pack28, hash tables)
+├── cmd/
+│   ├── decodewav/       # Command-line WAV decoder
+│   └── genwav/          # Command-line WAV generator
+└── *.go (root)          # Public API surface
 ```
+
+## References & Acknowledgements
+
+- **WSJT-X** — The original FT8 specification and Fortran reference
+  implementation (WSJT-X 2.7.0).
+- **MSHV** — [MSHV](https://www.mshv.org/) by Christo LZ2HV. This project uses
+  MSHV v2.76 as the behavioural reference for SNR calibration, TX frequency
+  clamping, multi-message FDMA spacing, frequency search limits, and message
+  packing priority order. Several parameters (e.g. `frq00_limit`, `dflimit`,
+  input scaling constants) are aligned directly with MSHV source values.
+- **goft8 (ColonelBlimp)** — An earlier Go port of WSJT-X 2.7.0 by
+  [ColonelBlimp](https://github.com/ColonelBlimp/goft8) (MIT), which provided
+  the starting point for the LDPC and sync8 implementation.
 
 ## License
 

@@ -1,11 +1,12 @@
-// metrics.go — Symbol spectra and soft-metric extraction for the research package.
+// metrics.go implements symbol spectra and soft-metric extraction.
 //
 // Port of the spectra/metric blocks in ft8b.f90 lines 154–233.
 // Source of truth: wsjt-wsjtx/lib/ft8/ft8b.f90.
 
-package goft8
+package decode
 
 import (
+	ft8params "github.com/bh4gdf/goft8/params"
 	"math"
 )
 
@@ -32,17 +33,17 @@ import (
 // Fortran cs is cs(0:7, 1:NN) — 0-indexed tone, 1-indexed symbol.
 // Go cs is cs[0..7][0..NN-1] — 0-indexed in both.
 // Fortran k=1 → Go index 0; Fortran csymb(1:8) → Go FFT output bins 0..7.
-func ComputeSymbolSpectra(cd0 []complex128, ibest int) ([8][NN]complex128, [8][NN]float64) {
-	var cs [8][NN]complex128
-	var s8 [8][NN]float64
+func ComputeSymbolSpectra(cd0 []complex128, ibest int) ([8][ft8params.NN]complex128, [8][ft8params.NN]float64) {
+	var cs [8][ft8params.NN]complex128
+	var s8 [8][ft8params.NN]float64
 
-	for k := 1; k <= NN; k++ {
+	for k := 1; k <= ft8params.NN; k++ {
 		i1 := ibest + (k-1)*32
 
 		// csymb = cmplx(0.0, 0.0)
 		// if( i1.ge.0 .and. i1+31 .le. NP2-1 ) csymb = cd0(i1:i1+31)
 		var csymb [32]complex128
-		if i1 >= 0 && i1+31 <= NP2-1 {
+		if i1 >= 0 && i1+31 <= ft8params.NP2-1 {
 			for j := 0; j < 32; j++ {
 				csymb[j] = cd0[i1+j]
 			}
@@ -128,7 +129,7 @@ func fft32(x []complex128) {
 //	call normalizebmet(bmetc,174)
 //	call normalizebmet(bmetd,174)
 //	call normalizebmet(bmete,174)  // MSHV enhancement
-func ComputeSoftMetrics(cs *[8][NN]complex128) (bmeta, bmetb, bmetc, bmetd, bmete [174]float64) {
+func ComputeSoftMetrics(cs *[8][ft8params.NN]complex128) (bmeta, bmetb, bmetc, bmetd, bmete [174]float64) {
 
 	// Fortran: logical one(0:511,0:8)
 	//   one(i,j) = iand(i, 2**j) .ne. 0
@@ -137,7 +138,7 @@ func ComputeSoftMetrics(cs *[8][NN]complex128) (bmeta, bmetb, bmetc, bmetd, bmet
 	}
 
 	// Fortran: data graymap/0,1,3,2,5,6,4,7/
-	graymap := GrayMap
+	graymap := ft8params.GrayMap
 
 	for nsym := 1; nsym <= 3; nsym++ {
 		nt := 1 << (3 * nsym) // 8, 64, 512

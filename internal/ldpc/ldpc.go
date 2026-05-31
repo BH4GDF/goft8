@@ -1,12 +1,12 @@
-// ldpc.go — LDPC decoder for the research package.
+// ldpc.go implements the (174,91) LDPC decoder with BP and OSD.
 //
 // Port of subroutine decode174_91 from wsjt-wsjtx/lib/ft8/decode174_91.f90,
 // subroutine osd174_91 from wsjt-wsjtx/lib/ft8/osd174_91.f90, and
 // subroutine platanh from wsjt-wsjtx/lib/platanh.f90.
-//
-// Ported directly from the Fortran source — no production ft8x dependency.
 
-package goft8
+package ldpc
+
+import ft8params "github.com/bh4gdf/goft8/params"
 
 import (
 	"math"
@@ -20,8 +20,8 @@ import (
 
 // DecodeResult holds the output of DecodeLDPC.
 type DecodeResult struct {
-	Message91   [LDPCk]int8
-	Codeword    [LDPCn]int8
+	Message91   [ft8params.LDPCk]int8
+	Codeword    [ft8params.LDPCn]int8
 	NHardErrors int
 	Dmin        float64
 	DecoderType int // 1=BP, 2=OSD
@@ -59,13 +59,13 @@ func platanh(x float64) float64 {
 
 var (
 	ldpcGenOnce sync.Once
-	ldpcGen     [LDPCm][LDPCk]int8
+	ldpcGen     [ft8params.LDPCm][ft8params.LDPCk]int8
 )
 
 // ldpcGenerator returns the (83×91) generator matrix G such that
 // parity[i] = (G[i] · message) mod 2.
 // Built once from the hex strings in ldpc_parity.go.
-func ldpcGenerator() *[LDPCm][LDPCk]int8 {
+func ldpcGenerator() *[ft8params.LDPCm][ft8params.LDPCk]int8 {
 	ldpcGenOnce.Do(func() {
 		for row, hex := range ldpcGeneratorHex {
 			col := 0
@@ -76,7 +76,7 @@ func ldpcGenerator() *[LDPCm][LDPCk]int8 {
 				}
 				nib, _ := strconv.ParseInt(string(ch), 16, 64)
 				for jj := 0; jj < ibmax; jj++ {
-					if col >= LDPCk {
+					if col >= ft8params.LDPCk {
 						break
 					}
 					// Fortran: btest(istr, 4-jj_1based) → bit (3-jj_0based).
@@ -91,22 +91,22 @@ func ldpcGenerator() *[LDPCm][LDPCk]int8 {
 	return &ldpcGen
 }
 
-// encodeLDPCNoCRC encodes a 91-bit message into a 174-bit codeword
+// EncodeLDPCNoCRC encodes a 91-bit message into a 174-bit codeword
 // without recomputing CRC.
 //
 // Port of subroutine encode174_91_nocrc from wsjt-wsjtx/lib/ft8/encode174_91.f90.
-func encodeLDPCNoCRC(message91 [LDPCk]int8) [LDPCn]int8 {
+func EncodeLDPCNoCRC(message91 [ft8params.LDPCk]int8) [ft8params.LDPCn]int8 {
 	gen := ldpcGenerator()
-	var cw [LDPCn]int8
-	for i := 0; i < LDPCk; i++ {
+	var cw [ft8params.LDPCn]int8
+	for i := 0; i < ft8params.LDPCk; i++ {
 		cw[i] = message91[i]
 	}
-	for i := 0; i < LDPCm; i++ {
+	for i := 0; i < ft8params.LDPCm; i++ {
 		sum := 0
-		for j := 0; j < LDPCk; j++ {
+		for j := 0; j < ft8params.LDPCk; j++ {
 			sum += int(message91[j]) * int(gen[i][j])
 		}
-		cw[LDPCk+i] = int8(sum % 2)
+		cw[ft8params.LDPCk+i] = int8(sum % 2)
 	}
 	return cw
 }
@@ -127,12 +127,12 @@ func encodeLDPCNoCRC(message91 [LDPCk]int8) [LDPCn]int8 {
 //	4=order-2+pre1+pre2, 5=order-3+pre, 6=order-4+pre.
 //
 // Port of subroutine decode174_91 from wsjt-wsjtx/lib/ft8/decode174_91.f90.
-func DecodeLDPC(llr [LDPCn]float64, keff, maxOSD, ndeep int, apmask [LDPCn]int8) (DecodeResult, bool) {
+func DecodeLDPC(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apmask [ft8params.LDPCn]int8) (DecodeResult, bool) {
 	const (
-		n             = LDPCn
-		m             = LDPCm
-		k             = LDPCk
-		ncw           = LDPCncw
+		n             = ft8params.LDPCn
+		m             = ft8params.LDPCm
+		k             = ft8params.LDPCk
+		ncw           = ft8params.LDPCncw
 		maxIterations = 30
 	)
 
@@ -347,11 +347,11 @@ func DecodeLDPC(llr [LDPCn]float64, keff, maxOSD, ndeep int, apmask [LDPCn]int8)
 // osdDecode is an ordered-statistics decoder for the (174,91) code.
 //
 // Port of subroutine osd174_91 from wsjt-wsjtx/lib/ft8/osd174_91.f90.
-func osdDecode(llr [LDPCn]float64, keff int, apmask [LDPCn]int8, ndeep int) ([LDPCk]int8, [LDPCn]int8, int, bool) {
+func osdDecode(llr [ft8params.LDPCn]float64, keff int, apmask [ft8params.LDPCn]int8, ndeep int) ([ft8params.LDPCk]int8, [ft8params.LDPCn]int8, int, bool) {
 	const (
-		n = LDPCn
-		k = LDPCk
-		m = LDPCm
+		n = ft8params.LDPCn
+		k = ft8params.LDPCk
+		m = ft8params.LDPCm
 	)
 
 	// osd174_91.f90 lines 37–65: build generator matrix (cached).
@@ -383,7 +383,7 @@ func osdDecode(llr [LDPCn]float64, keff int, apmask [LDPCn]int8, ndeep int) ([LD
 	indx := argsortAsc(absrx) // indx[0]=least reliable
 
 	// osd174_91.f90 lines 79–82: reorder generator matrix by decreasing reliability.
-	var genmrb [LDPCk][n]int8
+	var genmrb [ft8params.LDPCk][n]int8
 	indices := make([]int, n)
 	for i := 0; i < n; i++ {
 		ridx := indx[n-1-i] // Fortran: indx(N+1-i)
@@ -736,10 +736,10 @@ func osdDecode(llr [LDPCn]float64, keff int, apmask [LDPCn]int8, ndeep int) ([LD
 
 // osdFinish re-orders the codeword, checks CRC, and returns the result.
 // Port of osd174_91.f90 lines 281–292.
-func osdFinish(bestCW [LDPCn]int8, indices []int, nhardMin int) ([LDPCk]int8, [LDPCn]int8, int, bool) {
+func osdFinish(bestCW [ft8params.LDPCn]int8, indices []int, nhardMin int) ([ft8params.LDPCk]int8, [ft8params.LDPCn]int8, int, bool) {
 	const (
-		n = LDPCn
-		k = LDPCk
+		n = ft8params.LDPCn
+		k = ft8params.LDPCk
 	)
 
 	// Re-order to natural bit order (osd174_91.f90 line 283).
@@ -763,21 +763,21 @@ func osdFinish(bestCW [LDPCn]int8, indices []int, nhardMin int) ([LDPCk]int8, [L
 
 var (
 	osdGenOnce sync.Once
-	osdGen     [LDPCk][LDPCn]int8
+	osdGen     [ft8params.LDPCk][ft8params.LDPCn]int8
 )
 
 // osdFullGenerator builds the full systematic generator matrix [k][n]
 // for the OSD decoder. Cached via sync.Once.
 //
 // Port of osd174_91.f90 lines 37–65: the "if(first)" block.
-func osdFullGenerator(keff int) *[LDPCk][LDPCn]int8 {
+func osdFullGenerator(keff int) *[ft8params.LDPCk][ft8params.LDPCn]int8 {
 	osdGenOnce.Do(func() {
 		gen := ldpcGenerator()
 		// Build full systematic generator: I(k) | G^T
-		for row := 0; row < LDPCk; row++ {
+		for row := 0; row < ft8params.LDPCk; row++ {
 			osdGen[row][row] = 1 // identity part
-			for p := 0; p < LDPCm; p++ {
-				osdGen[row][LDPCk+p] = gen[p][row]
+			for p := 0; p < ft8params.LDPCm; p++ {
+				osdGen[row][ft8params.LDPCk+p] = gen[p][row]
 			}
 		}
 	})
@@ -797,12 +797,12 @@ type osdPairEntry struct {
 // Port of subroutine mrbencode91 from wsjt-wsjtx/lib/ft8/osd174_91.f90 lines 295–305.
 // Uses genmrb directly (row-major) for sequential memory access instead of
 // the transposed g2 used in the Fortran original.
-func mrbEncode91(me [LDPCk]int8, genmrb [LDPCk][LDPCn]int8) [LDPCn]int8 {
-	var cw [LDPCn]int8
-	for i := 0; i < LDPCk; i++ {
+func mrbEncode91(me [ft8params.LDPCk]int8, genmrb [ft8params.LDPCk][ft8params.LDPCn]int8) [ft8params.LDPCn]int8 {
+	var cw [ft8params.LDPCn]int8
+	for i := 0; i < ft8params.LDPCk; i++ {
 		if me[i] == 1 {
 			row := genmrb[i][:]
-			for c := 0; c < LDPCn; c++ {
+			for c := 0; c < ft8params.LDPCn; c++ {
 				cw[c] ^= row[c]
 			}
 		}
@@ -826,7 +826,7 @@ func nextpat91(mi []int8, k, iorder int) int {
 		return -1
 	}
 
-	var ms [LDPCk]int8
+	var ms [ft8params.LDPCk]int8
 	copy(ms[:], mi[:ind])
 	ms[ind] = 1
 	// ms[ind+1] stays 0.

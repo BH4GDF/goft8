@@ -1,9 +1,9 @@
-package goft8
+package decode
 
 import "testing"
 
 func TestAPQSOProgress(t *testing.T) {
-	// Verify naptypes_2 dispatch matches MSHV decoderft8.cpp.
+	// Verify Naptypes2 dispatch matches MSHV decoderft8.cpp.
 	tests := []struct {
 		prog     int
 		apIdx    int
@@ -22,16 +22,16 @@ func TestAPQSOProgress(t *testing.T) {
 		{5, 2, 2}, // MyCall
 	}
 	for _, tc := range tests {
-		got := naptypes_2[tc.prog][tc.apIdx]
+		got := Naptypes2[tc.prog][tc.apIdx]
 		if got != tc.wantType {
-			t.Errorf("naptypes_2[%d][%d] = %d, want %d", tc.prog, tc.apIdx, got, tc.wantType)
+			t.Errorf("Naptypes2[%d][%d] = %d, want %d", tc.prog, tc.apIdx, got, tc.wantType)
 		}
 	}
 }
 
 func TestNappasses_2(t *testing.T) {
 	want := [6]int{2, 2, 2, 4, 4, 3}
-	if nappasses_2 != want {
-		t.Errorf("nappasses_2 = %v, want %v", nappasses_2, want)
+	if Nappasses2 != want {
+		t.Errorf("Nappasses2 = %v, want %v", Nappasses2, want)
 	}
 }

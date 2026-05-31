@@ -1,15 +1,16 @@
-// ldpc_parity.go — LDPC parity-check matrix data for the research package.
+// ldpc_parity.go holds the LDPC (174,91) parity-check matrix.
 //
 // Port of wsjt-wsjtx/lib/ft8/ldpc_174_91_c_parity.f90 and
 // wsjt-wsjtx/lib/ft8/ldpc_174_91_c_generator.f90.
-//
-// Pure data — no production dependency.
 
-package goft8
+package ldpc
 
+import ft8params "github.com/bh4gdf/goft8/params"
+
+// LDPCMn is the check-node adjacency matrix for the LDPC code.
 // LDPCMn[i][j] gives the j-th check node that variable node i belongs to (1-indexed).
 // Fortran: Mn(3,N), transposed to [N][3] in Go.
-var LDPCMn = [LDPCn][LDPCncw]int{
+var LDPCMn = [ft8params.LDPCn][ft8params.LDPCncw]int{
 	{16, 45, 73}, {25, 51, 62}, {33, 58, 78}, {1, 44, 45}, {2, 7, 61},
 	{3, 6, 54}, {4, 35, 48}, {5, 13, 21}, {8, 56, 79}, {9, 64, 69},
 	{10, 19, 66}, {11, 36, 60}, {12, 37, 58}, {14, 32, 43}, {15, 63, 80},
@@ -47,9 +48,10 @@ var LDPCMn = [LDPCn][LDPCncw]int{
 	{41, 42, 63}, {49, 75, 83}, {20, 44, 48}, {42, 49, 57},
 }
 
+// LDPCNm is the variable-node adjacency matrix for the LDPC code.
 // LDPCNm[i][j] gives the j-th variable node in check i (1-indexed, 0 = unused).
 // Fortran: Nm(7,M), transposed to [M][7] in Go.
-var LDPCNm = [LDPCm][7]int{
+var LDPCNm = [ft8params.LDPCm][7]int{
 	{4, 31, 59, 91, 92, 96, 153}, {5, 32, 60, 93, 115, 146, 0},
 	{6, 24, 61, 94, 122, 151, 0}, {7, 33, 62, 95, 96, 143, 0},
 	{8, 25, 63, 83, 93, 96, 148}, {6, 32, 64, 97, 126, 138, 0},
@@ -94,8 +96,9 @@ var LDPCNm = [LDPCm][7]int{
 	{17, 42, 75, 129, 170, 172, 0},
 }
 
+// LDPCNrw is the row-weight array for the LDPC parity-check matrix.
 // LDPCNrw[i] is the number of variable nodes in check i (either 6 or 7).
-var LDPCNrw = [LDPCm]int{
+var LDPCNrw = [ft8params.LDPCm]int{
 	7, 6, 6, 6, 7, 6, 7, 6, 6, 7, 6, 6, 7, 7, 6, 6,
 	6, 7, 6, 7, 6, 7, 6, 6, 6, 7, 6, 6, 6, 7, 6, 6,
 	6, 6, 7, 6, 6, 6, 7, 7, 6, 6, 6, 6, 7, 7, 6, 6,
@@ -107,7 +110,7 @@ var LDPCNrw = [LDPCm]int{
 // ldpcGeneratorHex holds the (83×91) generator matrix as hex strings.
 // Each row encodes 91 bits: 22 full nibbles (88 bits) + 1 nibble using top 3 bits.
 // Ported from wsjt-wsjtx/lib/ft8/ldpc_174_91_c_generator.f90.
-var ldpcGeneratorHex = [LDPCm]string{
+var ldpcGeneratorHex = [ft8params.LDPCm]string{
 	"8329ce11bf31eaf509f27fc", "761c264e25c259335493132",
 	"dc265902fb277c6410a1bdc", "1b3f417858cd2dd33ec7f62",
 	"09fda4fee04195fd034783a", "077cccc11b8873ed5c3d48a",

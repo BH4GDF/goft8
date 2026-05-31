@@ -1,14 +1,12 @@
-// sync8.go — Research port of WSJT-X's sync8 subroutine.
+// sync8.go implements FT8 sync detection and candidate search.
 //
 // Port of subroutine sync8 from wsjt-wsjtx/lib/ft8/sync8.f90.
-//
-// The pipeline is scaffolded as separate functions matching the Fortran
-// steps.  Each step is initially a do-nothing stub; implement from top
-// to bottom.
 
-package goft8
+package decode
 
 import (
+	"github.com/bh4gdf/goft8/internal/dsp"
+	ft8params "github.com/bh4gdf/goft8/params"
 	"math"
 	"runtime"
 	"sort"
@@ -20,7 +18,7 @@ import (
 var fftBufPool = sync.Pool{
 	New: func() any {
 		// Largest size needed is NFFT1; callers slice down if they need less.
-		return make([]float32, NFFT1)
+		return make([]float32, ft8params.NFFT1)
 	},
 }
 
@@ -43,7 +41,7 @@ const (
 // For standard FT8 (nfos=2) the matrix is (NH1+14) × 125 float64 ≈ 1.9 MB.
 var sync2dPool = sync.Pool{
 	New: func() any {
-		nh1Pad := NH1 + 2*6 + 1 // nfos=2
+		nh1Pad := ft8params.NH1 + 2*6 + 1 // nfos=2
 		lagCols := 2*jz + 1
 		backing := make([]float64, (nh1Pad+1)*lagCols)
 		sync2d := make([][]float64, nh1Pad+1)
@@ -67,8 +65,9 @@ type Candidate struct {
 // workers > 0  = use that many goroutines explicitly (capped at 8).
 // workers == 0 = serial (default, no concurrency).
 // workers < 0  = auto-detect: min(4, runtime.NumCPU()) to avoid
-//                hyper-threading overhead and excessive allocations.
-func numWorkers(workers int) int {
+//
+//	hyper-threading overhead and excessive allocations.
+func NumWorkers(workers int) int {
 	if workers > 0 {
 		if workers > 16 {
 			return 16
@@ -109,22 +108,26 @@ type Spectrogram struct {
 //
 // Port of subroutine sync8(dd,npts,nfa,nfb,syncmin,nfqso,maxcand,candidate,ncand,sbase)
 // from wsjt-wsjtx/lib/ft8/sync8.f90.
-func Sync8(dd [NMAX]float32, npts int, nfa, nfb int, syncmin float64, nfqso int, maxcand int, workers int) (candidates []Candidate, sbase [NH1]float64) {
+func Sync8(dd [ft8params.NMAX]float32, npts int, nfa, nfb int, syncmin float64, nfqso int, maxcand int, workers int) (candidates []Candidate, sbase [ft8params.NH1]float64) {
 
 	// ── Derived constants (sync8.f90 lines 29–31) ────────────────────
-	tstep := float64(NSTEP) / Fs // 0.04 s per spectrogram step
-	df := Fs / float64(NFFT1)    // 3.125 Hz per frequency bin
-	nssy := NSPS / NSTEP         // 4: spectrogram steps per symbol
-	nfos := NFFT1 / NSPS         // 2: frequency oversampling factor
-	jstrt := int(0.5 / tstep)    // 12: 0.5 s offset in steps (Fortran truncation of 12.5)
+	tstep := float64(ft8params.NSTEP) / ft8params.Fs // 0.04 s per spectrogram step
+	df := ft8params.Fs / float64(ft8params.NFFT1)    // 3.125 Hz per frequency bin
+	nssy := ft8params.NSPS / ft8params.NSTEP         // 4: spectrogram steps per symbol
+	nfos := ft8params.NFFT1 / ft8params.NSPS         // 2: frequency oversampling factor
+	jstrt := int(0.5 / tstep)                        // 12: 0.5 s offset in steps (Fortran truncation of 12.5)
 
 	// ── Step 1: Compute spectrogram (sync8.f90 lines 28–43) ──────────
 	// *** START HERE ***
 	spec := computeSpectrogram(dd[:], npts, workers)
 	minSpec, maxSpec := 1e9, -1e9
 	for _, v := range spec.Savg {
-		if v < minSpec { minSpec = v }
-		if v > maxSpec { maxSpec = v }
+		if v < minSpec {
+			minSpec = v
+		}
+		if v > maxSpec {
+			maxSpec = v
+		}
 	}
 
 	// ── Step 1b: Spectrum baseline (sync8.f90 line 44) ───────────────
@@ -177,26 +180,27 @@ func Sync8(dd [NMAX]float32, npts int, nfa, nfb int, syncmin float64, nfqso int,
 //  3. Real-to-complex FFT → NH1=1920 complex bins
 //  4. Store power s(i,j) = re² + im²
 //  5. Accumulate average spectrum savg
+//
 // specBackingPool reuses the large contiguous backing array for computeSpectrogram.
 // Size: (nh1Pad+1)*cols float64 ≈ 5.5 MiB.
 var specBackingPool = sync.Pool{New: func() interface{} {
-	nfos := NFFT1 / NSPS
-	nh1Pad := NH1 + nfos*6 + 1
-	cols := NHSYM + 1
+	nfos := ft8params.NFFT1 / ft8params.NSPS
+	nh1Pad := ft8params.NH1 + nfos*6 + 1
+	cols := ft8params.NHSYM + 1
 	return make([]float64, (nh1Pad+1)*cols)
 }}
 
 // specSavgPool reuses the average-spectrum slice for computeSpectrogram.
 var specSavgPool = sync.Pool{New: func() interface{} {
-	return make([]float64, NH1+1)
+	return make([]float64, ft8params.NH1+1)
 }}
 
 func computeSpectrogram(dd []float32, npts int, workers int) *Spectrogram {
 	const fac float32 = 1.0 / 300.0 // sync8.f90 line 32
 
-	nfos := NFFT1 / NSPS // 2
-	nh1Pad := NH1 + nfos*6 + 1
-	cols := NHSYM + 1
+	nfos := ft8params.NFFT1 / ft8params.NSPS // 2
+	nh1Pad := ft8params.NH1 + nfos*6 + 1
+	cols := ft8params.NHSYM + 1
 	backing := specBackingPool.Get().([]float64)
 	// Zero the backing array (pool may return dirty memory).
 	for i := range backing {
@@ -214,10 +218,10 @@ func computeSpectrogram(dd []float32, npts int, workers int) *Spectrogram {
 	if workers <= 1 {
 		// Serial path
 		buf := fftBufPool.Get().([]float32)
-		buf = buf[:NSPS]
-		for j := 1; j <= NHSYM; j++ {
-			ia := (j - 1) * NSTEP
-			for k := 0; k < NSPS; k++ {
+		buf = buf[:ft8params.NSPS]
+		for j := 1; j <= ft8params.NHSYM; j++ {
+			ia := (j - 1) * ft8params.NSTEP
+			for k := 0; k < ft8params.NSPS; k++ {
 				idx := ia + k
 				if idx < npts {
 					buf[k] = fac * dd[idx]
@@ -225,8 +229,8 @@ func computeSpectrogram(dd []float32, npts int, workers int) *Spectrogram {
 					buf[k] = 0
 				}
 			}
-			pow := SpectrogramFFT3840(buf)
-			for i := 1; i <= NH1; i++ {
+			pow := dsp.SpectrogramFFT3840(buf)
+			for i := 1; i <= ft8params.NH1; i++ {
 				s[i][j] = pow[i-1]
 				savg[i] += pow[i-1]
 			}
@@ -237,30 +241,30 @@ func computeSpectrogram(dd []float32, npts int, workers int) *Spectrogram {
 
 	nw := workers
 	// Parallel path: split NHSYM time steps across workers.
-	chunkSize := (NHSYM + nw - 1) / nw
+	chunkSize := (ft8params.NHSYM + nw - 1) / nw
 	var wg sync.WaitGroup
 	localSavgs := make([][]float64, nw)
 	for w := 0; w < nw; w++ {
-		localSavgs[w] = make([]float64, NH1+1)
+		localSavgs[w] = make([]float64, ft8params.NH1+1)
 	}
 
 	for w := 0; w < nw; w++ {
 		start := w*chunkSize + 1
 		end := start + chunkSize - 1
-		if start > NHSYM {
+		if start > ft8params.NHSYM {
 			continue
 		}
-		if end > NHSYM {
-			end = NHSYM
+		if end > ft8params.NHSYM {
+			end = ft8params.NHSYM
 		}
 		wg.Add(1)
 		go func(id, jStart, jEnd int) {
 			defer wg.Done()
 			buf := fftBufPool.Get().([]float32)
-			buf = buf[:NSPS]
+			buf = buf[:ft8params.NSPS]
 			for j := jStart; j <= jEnd; j++ {
-				ia := (j - 1) * NSTEP
-				for k := 0; k < NSPS; k++ {
+				ia := (j - 1) * ft8params.NSTEP
+				for k := 0; k < ft8params.NSPS; k++ {
 					idx := ia + k
 					if idx < npts {
 						buf[k] = fac * dd[idx]
@@ -268,8 +272,8 @@ func computeSpectrogram(dd []float32, npts int, workers int) *Spectrogram {
 						buf[k] = 0
 					}
 				}
-				pow := SpectrogramFFT3840(buf)
-				for i := 1; i <= NH1; i++ {
+				pow := dsp.SpectrogramFFT3840(buf)
+				for i := 1; i <= ft8params.NH1; i++ {
 					s[i][j] = pow[i-1]
 					localSavgs[id][i] += pow[i-1]
 				}
@@ -280,7 +284,7 @@ func computeSpectrogram(dd []float32, npts int, workers int) *Spectrogram {
 	wg.Wait()
 
 	for w := 0; w < nw; w++ {
-		for i := 1; i <= NH1; i++ {
+		for i := 1; i <= ft8params.NH1; i++ {
 			savg[i] += localSavgs[w][i]
 		}
 	}
@@ -306,42 +310,42 @@ func ComputeSync2DForTest(spec *Spectrogram, nfa, nfb int, df float64, nssy, nfo
 //
 // Computes noise floor per frequency bin.  Used by ft8b for xsnr2, not
 // by the candidate detection itself.
-func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [NH1]float64 {
+func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [ft8params.NH1]float64 {
 	const (
 		NF  = 93
-		NST = NFFT1 / 2 // 960
+		NST = ft8params.NFFT1 / 2 // 960
 	)
 
-	window := nuttallWindow(NFFT1)
+	window := nuttallWindow(ft8params.NFFT1)
 	summ := 0.0
 	for _, v := range window {
 		summ += v
 	}
-	summ = summ * float64(NSPS) * 2.0 / 300.0
+	summ = summ * float64(ft8params.NSPS) * 2.0 / 300.0
 	for i := range window {
 		window[i] /= summ
 	}
 
-	savg := make([]float64, NH1)
+	savg := make([]float64, ft8params.NH1)
 
 	if workers <= 1 {
 		// Serial path
 		for j := 0; j < NF; j++ {
 			ia := j * NST
-			ib := ia + NFFT1 - 1
-			if ib >= NMAX {
+			ib := ia + ft8params.NFFT1 - 1
+			if ib >= ft8params.NMAX {
 				break
 			}
 
-			x := make([]float32, NFFT1)
-			for z := 0; z < NFFT1; z++ {
+			x := make([]float32, ft8params.NFFT1)
+			for z := 0; z < ft8params.NFFT1; z++ {
 				if ia+z < len(dd) {
 					x[z] = float32(float64(dd[ia+z]) * window[z])
 				}
 			}
 
-			pow := SpectrogramFFT3840(x)
-			for i := 0; i < NH1; i++ {
+			pow := dsp.SpectrogramFFT3840(x)
+			for i := 0; i < ft8params.NH1; i++ {
 				savg[i] += pow[i]
 			}
 		}
@@ -351,7 +355,7 @@ func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [NH1]float64 {
 		chunkSize := (NF + nw - 1) / nw
 		localSavgs := make([][]float64, nw)
 		for w := 0; w < nw; w++ {
-			localSavgs[w] = make([]float64, NH1)
+			localSavgs[w] = make([]float64, ft8params.NH1)
 		}
 		var wg sync.WaitGroup
 		for w := 0; w < nw; w++ {
@@ -367,15 +371,15 @@ func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [NH1]float64 {
 			go func(id, jStart, jEnd int) {
 				defer wg.Done()
 				x := fftBufPool.Get().([]float32)
-				x = x[:NFFT1]
+				x = x[:ft8params.NFFT1]
 				for j := jStart; j < jEnd; j++ {
 					ia := j * NST
-					ib := ia + NFFT1 - 1
-					if ib >= NMAX {
+					ib := ia + ft8params.NFFT1 - 1
+					if ib >= ft8params.NMAX {
 						break
 					}
 
-					for z := 0; z < NFFT1; z++ {
+					for z := 0; z < ft8params.NFFT1; z++ {
 						if ia+z < len(dd) {
 							x[z] = float32(float64(dd[ia+z]) * window[z])
 						} else {
@@ -383,8 +387,8 @@ func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [NH1]float64 {
 						}
 					}
 
-					pow := SpectrogramFFT3840(x)
-					for i := 0; i < NH1; i++ {
+					pow := dsp.SpectrogramFFT3840(x)
+					for i := 0; i < ft8params.NH1; i++ {
 						localSavgs[id][i] += pow[i]
 					}
 				}
@@ -393,7 +397,7 @@ func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [NH1]float64 {
 		}
 		wg.Wait()
 		for w := 0; w < nw; w++ {
-			for i := 0; i < NH1; i++ {
+			for i := 0; i < ft8params.NH1; i++ {
 				savg[i] += localSavgs[w][i]
 			}
 		}
@@ -401,21 +405,15 @@ func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [NH1]float64 {
 
 	minS, maxS := 1e9, -1e9
 	for _, v := range savg {
-		if v < minS { minS = v }
-		if v > maxS { maxS = v }
-	}
-	sbase := baseline(savg, nfa, nfb)
-	// Clamp unrealistically low noise floors to a sensible minimum.
-	// When the input is very clean (e.g. synthetic test.wav) the baseline
-	// fit can drop below -50 dB because most spectral bins are clamped
-	// at the 1e-6 floor.  MSHV effectively stabilises around -30 dB in
-	// this regime, so we mirror that behaviour.
-	for i := range sbase {
-		if sbase[i] < -29.0 {
-			sbase[i] = -29.0
+		if v < minS {
+			minS = v
+		}
+		if v > maxS {
+			maxS = v
 		}
 	}
-	var result [NH1]float64
+	sbase := baseline(savg, nfa, nfb)
+	var result [ft8params.NH1]float64
 	copy(result[:], sbase)
 	return result
 }
@@ -439,7 +437,7 @@ func nuttallWindow(n int) []float64 {
 // baseline fits a low-order polynomial to the noise floor of a spectrum.
 // Port of MSHV's baseline() (from decoderft8.cpp).
 func baseline(s []float64, nfa, nfb int) []float64 {
-	df := Fs / float64(NFFT1)
+	df := ft8params.Fs / float64(ft8params.NFFT1)
 	ia := int(math.Max(0, float64(nfa)/df))
 	ib := int(float64(nfb) / df)
 	if ib >= len(s) {
@@ -453,8 +451,8 @@ func baseline(s []float64, nfa, nfb int) []float64 {
 	const npct = 10
 
 	for i := ia; i <= ib; i++ {
-		if s[i] < 1e-6 {
-			s[i] = 1e-6
+		if s[i] < 1e-18 {
+			s[i] = 1e-18
 		}
 		s[i] = 10.0 * math.Log10(s[i])
 	}
@@ -508,20 +506,23 @@ func baseline(s []float64, nfa, nfb int) []float64 {
 	}
 	minY, maxY, avgY := 1e9, -1e9, 0.0
 	for _, v := range y {
-		if v < minY { minY = v }
-		if v > maxY { maxY = v }
+		if v < minY {
+			minY = v
+		}
+		if v > maxY {
+			maxY = v
+		}
 		avgY += v
 	}
 	avgY /= float64(len(y))
 	aNorm := polyfit(xNorm, y, nterms)
-
 
 	sbase := make([]float64, len(s))
 	for i := range sbase {
 		sbase[i] = 0
 	}
 	for i := ia; i <= ib; i++ {
-		t := float64(i - i0) / xscale
+		t := float64(i-i0) / xscale
 		sbase[i] = aNorm[0] + t*(aNorm[1]+t*(aNorm[2]+t*(aNorm[3]+t*aNorm[4]))) + 0.65
 	}
 	return sbase
@@ -655,7 +656,7 @@ func computeSync2D(spec *Spectrogram, nfa, nfb int, df float64, nssy, nfos, jstr
 		return nil
 	}
 
-	nh1Pad := NH1 + nfos*6 + 1
+	nh1Pad := ft8params.NH1 + nfos*6 + 1
 	lagCols := 2*jz + 1
 
 	// Reuse pooled sync2d matrix (≈1.9 MB).  For standard FT8 (nfos=2) the
@@ -682,7 +683,7 @@ func computeSync2D(spec *Spectrogram, nfa, nfb int, df float64, nssy, nfos, jstr
 			var sCos [7][]float64
 			var sNoise [7][]float64
 			for n := 0; n < 7; n++ {
-				sCos[n] = s[i+nfos*Icos7[n]]
+				sCos[n] = s[i+nfos*ft8params.Icos7[n]]
 				sNoise[n] = s[i+nfos*n]
 			}
 
@@ -696,7 +697,7 @@ func computeSync2D(spec *Spectrogram, nfa, nfb int, df float64, nssy, nfos, jstr
 
 					// ── Array a: first Costas (symbols 0–6) ──────────
 					// sync8.f90 lines 64–67
-					if m >= 1 && m <= NHSYM {
+					if m >= 1 && m <= ft8params.NHSYM {
 						ta += sCos[n][m]
 						for k := 0; k <= 6; k++ {
 							t0a += sNoise[k][m]
@@ -706,7 +707,7 @@ func computeSync2D(spec *Spectrogram, nfa, nfb int, df float64, nssy, nfos, jstr
 					// ── Array b: second Costas (symbols 36–42) ───────
 					// sync8.f90 lines 68–69 (no bounds check in Fortran)
 					mb := m + nssy*36
-					if mb >= 1 && mb <= NHSYM {
+					if mb >= 1 && mb <= ft8params.NHSYM {
 						tb += sCos[n][mb]
 						for k := 0; k <= 6; k++ {
 							t0b += sNoise[k][mb]
@@ -716,7 +717,7 @@ func computeSync2D(spec *Spectrogram, nfa, nfb int, df float64, nssy, nfos, jstr
 					// ── Array c: third Costas (symbols 72–78) ────────
 					// sync8.f90 lines 70–73
 					mc := m + nssy*72
-					if mc >= 1 && mc <= NHSYM {
+					if mc >= 1 && mc <= ft8params.NHSYM {
 						tc += sCos[n][mc]
 						for k := 0; k <= 6; k++ {
 							t0c += sNoise[k][mc]
@@ -776,7 +777,7 @@ func computeSync2D(spec *Spectrogram, nfa, nfb int, df float64, nssy, nfos, jstr
 					var sCos [7][]float64
 					var sNoise [7][]float64
 					for n := 0; n < 7; n++ {
-						sCos[n] = s[i+nfos*Icos7[n]]
+						sCos[n] = s[i+nfos*ft8params.Icos7[n]]
 						sNoise[n] = s[i+nfos*n]
 					}
 
@@ -787,7 +788,7 @@ func computeSync2D(spec *Spectrogram, nfa, nfb int, df float64, nssy, nfos, jstr
 						for n := 0; n <= 6; n++ {
 							m := j + jstrt + nssy*n
 
-							if m >= 1 && m <= NHSYM {
+							if m >= 1 && m <= ft8params.NHSYM {
 								ta += sCos[n][m]
 								for k := 0; k <= 6; k++ {
 									t0a += sNoise[k][m]
@@ -795,7 +796,7 @@ func computeSync2D(spec *Spectrogram, nfa, nfb int, df float64, nssy, nfos, jstr
 							}
 
 							mb := m + nssy*36
-							if mb >= 1 && mb <= NHSYM {
+							if mb >= 1 && mb <= ft8params.NHSYM {
 								tb += sCos[n][mb]
 								for k := 0; k <= 6; k++ {
 									t0b += sNoise[k][mb]
@@ -803,7 +804,7 @@ func computeSync2D(spec *Spectrogram, nfa, nfb int, df float64, nssy, nfos, jstr
 							}
 
 							mc := m + nssy*72
-							if mc >= 1 && mc <= NHSYM {
+							if mc >= 1 && mc <= ft8params.NHSYM {
 								tc += sCos[n][mc]
 								for k := 0; k <= 6; k++ {
 									t0c += sNoise[k][mc]
@@ -854,15 +855,15 @@ func computeSync2D(spec *Spectrogram, nfa, nfb int, df float64, nssy, nfos, jstr
 //	red2[i]   = sync2d at jpeak2[i]
 func findPeaks(sync2d [][]float64, nfa, nfb int, df float64) (jpeak []int, red []float64, jpeak2 []int, red2 []float64) {
 	if sync2d == nil {
-		return make([]int, NH1+1), make([]float64, NH1+1),
-			make([]int, NH1+1), make([]float64, NH1+1)
+		return make([]int, ft8params.NH1+1), make([]float64, ft8params.NH1+1),
+			make([]int, ft8params.NH1+1), make([]float64, ft8params.NH1+1)
 	}
 
 	// sync8.f90 lines 87–88: initialize to zero
-	jpeak = make([]int, NH1+1)
-	red = make([]float64, NH1+1)
-	jpeak2 = make([]int, NH1+1)
-	red2 = make([]float64, NH1+1)
+	jpeak = make([]int, ft8params.NH1+1)
+	red = make([]float64, ft8params.NH1+1)
+	jpeak2 = make([]int, ft8params.NH1+1)
+	red2 = make([]float64, ft8params.NH1+1)
 
 	// sync8.f90 lines 46–47: recompute freq bin bounds (same as computeSync2D)
 	iaFreq := int(math.Round(float64(nfa) / df))
@@ -953,8 +954,8 @@ func normalizeByPercentile(red, red2 []float64, nfa, nfb int, df float64) []int 
 	if ibase < 1 {
 		ibase = 1
 	}
-	if ibase > NH1 {
-		ibase = NH1
+	if ibase > ft8params.NH1 {
+		ibase = ft8params.NH1
 	}
 
 	// sync8.f90 lines 109–110: base = red(ibase); red = red / base
@@ -975,8 +976,8 @@ func normalizeByPercentile(red, red2 []float64, nfa, nfb int, df float64) []int 
 	if ibase2 < 1 {
 		ibase2 = 1
 	}
-	if ibase2 > NH1 {
-		ibase2 = NH1
+	if ibase2 > ft8params.NH1 {
+		ibase2 = ft8params.NH1
 	}
 
 	base2 := red2[ibase2]

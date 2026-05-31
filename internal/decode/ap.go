@@ -1,12 +1,15 @@
-// ap.go — A-priori (AP) decoding support for the research package.
+// ap.go implements a-priori (AP) decoding support.
 //
 // Port of the AP injection block in ft8b.f90 lines 300–401 (ncontest=0 only).
-// Ported directly from the Fortran source — this file has zero production
-// ft8x dependencies.
 
-package goft8
+package decode
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/bh4gdf/goft8/internal/protocol"
+	ft8params "github.com/bh4gdf/goft8/params"
+)
 
 // ── AP message constants (±1 form) ──────────────────────────────────────
 //
@@ -70,7 +73,7 @@ func ComputeAPSymbols(mycall, hiscall string) [58]int {
 	}
 
 	// Pack mycall
-	n28a := pack28(mc)
+	n28a := protocol.Pack28(mc)
 
 	// Write n28a as 28 bits (MSB first) into apsym[0:27], ipa=0 into apsym[28]
 	for i := 0; i < 28; i++ {
@@ -86,7 +89,7 @@ func ComputeAPSymbols(mycall, hiscall string) [58]int {
 		return apsym
 	}
 
-	n28b := pack28(hc)
+	n28b := protocol.Pack28(hc)
 	for i := 0; i < 28; i++ {
 		bit := (n28b >> uint(27-i)) & 1
 		apsym[29+i] = 2*bit - 1
@@ -96,17 +99,18 @@ func ComputeAPSymbols(mycall, hiscall string) [58]int {
 	return apsym
 }
 
-// naptypes_2 maps [nQSOProgress][apIdx] → iaptype.
-// Port of MSHV decoderft8.cpp static const int naptypes_2[6][4].
+// Naptypes2 maps [nQSOProgress][apIdx] → iaptype.
+// Port of MSHV decoderft8.cpp static const int Naptypes2[6][4].
 //
 // nQSOProgress meanings:
-//   0 = Calling CQ
-//   1 = Rx1 (received reply)
-//   2 = Rx2 (received report)
-//   3 = Rx3 (received RRR/73/RR73)
-//   4 = Tx3 (sending report)
-//   5 = Tx4/Tx5/Tx6 (signoff)
-var naptypes_2 = [6][4]int{
+//
+//	0 = Calling CQ
+//	1 = Rx1 (received reply)
+//	2 = Rx2 (received report)
+//	3 = Rx3 (received RRR/73/RR73)
+//	4 = Tx3 (sending report)
+//	5 = Tx4/Tx5/Tx6 (signoff)
+var Naptypes2 = [6][4]int{
 	{1, 2, 0, 0}, // 0: CQ → MyCall
 	{2, 3, 0, 0}, // 1: MyCall → MyCall+DxCall
 	{2, 3, 0, 0}, // 2: MyCall → MyCall+DxCall
@@ -115,9 +119,9 @@ var naptypes_2 = [6][4]int{
 	{3, 1, 2, 0}, // 5: MyCall+DxCall → CQ → MyCall
 }
 
-// nappasses_2 maps nQSOProgress → number of AP pass pairs to try.
+// Nappasses2 maps nQSOProgress → number of AP pass pairs to try.
 // Each pair consists of one llra pass + one llrc pass.
-var nappasses_2 = [6]int{2, 2, 2, 4, 4, 3}
+var Nappasses2 = [6]int{2, 2, 2, 4, 4, 3}
 
 // ApplyAP injects a-priori information into the LLR and mask arrays.
 //
@@ -131,7 +135,7 @@ var nappasses_2 = [6]int{2, 2, 2, 4, 4, 3}
 //   - apsym: AP symbols (±1 form); apsym[0:28] = mycall c28, apsym[29:57] = dxcall c28
 //   - apmag: magnitude of AP LLRs
 //   - contestType: 0=standard, 2=NA/EU VHF, 3=ARRL Field Day, 4=ARRL RTTY RU
-func ApplyAP(llrz *[LDPCn]float64, apmask *[LDPCn]int8, iaptype int, apsym [58]int, apmag float64, contestType int) {
+func ApplyAP(llrz *[ft8params.LDPCn]float64, apmask *[ft8params.LDPCn]int8, iaptype int, apsym [58]int, apmag float64, contestType int) {
 	// ft8b.f90 line 270–271: apmask=0; iaptype=0  (caller zeroes for non-AP passes)
 	// Here we always zero apmask first, then fill per iaptype.
 	for i := range apmask {
