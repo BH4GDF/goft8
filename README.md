@@ -2,6 +2,10 @@
 
 A Go implementation of the FT8 digital mode encoder and decoder.
 
+> **This is the `fftw` branch** — a high-performance variant that uses
+> FFTW3 (via CGO) for FFT and MSHV's C++ LDPC/OSD decoder.
+> For the pure-Go version, see the [`main`](https://github.com/BH4GDF/goft8/tree/main) branch.
+
 ## Features
 
 - **Decoder**: Full FT8 decode pipeline (sync8, LDPC BP+OSD, CRC, message unpack)
@@ -14,9 +18,23 @@ A Go implementation of the FT8 digital mode encoder and decoder.
   - Non-standard callsigns, Telemetry, Free text
   - CRC-14, LDPC (174,91), GFSK tone generation, waveform synthesis
   - Configurable output sample rate (12 kHz / 48 kHz) and bit depth (16/24/32-bit)
-- **Pure Go**: No CGO dependencies. Works on any Go-supported platform.
+- **CGO + FFTW3 + MSHV C++ LDPC**: This branch requires CGO and the FFTW3
+  development libraries. Decode is ~2.2× faster than the pure-Go `main` branch.
 
 ## Installation
+
+**Prerequisites**
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install libfftw3-dev
+
+# macOS
+brew install fftw
+
+# Fedora
+sudo dnf install fftw-devel
+```
 
 ```bash
 go get github.com/bh4gdf/goft8
@@ -79,8 +97,8 @@ detail is hidden under `internal/`:
 goft8/
 ├── params/              # FT8 algorithm constants (Fs, NN, NSPS, LDPC params, Gray map)
 ├── internal/
-│   ├── dsp/             # FFT / IFFT / RealFFT utilities (pure-Go + gonum)
-│   ├── ldpc/            # LDPC (174,91) encoder/decoder + CRC-14
+│   ├── dsp/             # FFT / IFFT / RealFFT utilities (FFTW3 via CGO)
+│   ├── ldpc/            # LDPC (174,91) encoder/decoder + CRC-14 (MSHV C++ via CGO)
 │   ├── decode/          # Decode pipeline (downsample, sync8, sync_d, metrics, AP, subtract)
 │   ├── encode/          # Tone generation and GFSK waveform synthesis
 │   └── protocol/        # Message packing/unpacking (pack77, pack28, hash tables)
