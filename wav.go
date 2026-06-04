@@ -43,23 +43,49 @@ func WriteWAV(name string, samples []float32, sampleRate int, bitDepth int) erro
 	defer f.Close()
 
 	// RIFF header
-	f.WriteString("RIFF")
-	binary.Write(f, binary.LittleEndian, uint32(36+dataSize))
-	f.WriteString("WAVE")
+	if _, err := f.WriteString("RIFF"); err != nil {
+		return err
+	}
+	if err := binary.Write(f, binary.LittleEndian, uint32(36+dataSize)); err != nil {
+		return err
+	}
+	if _, err := f.WriteString("WAVE"); err != nil {
+		return err
+	}
 
 	// fmt sub-chunk
-	f.WriteString("fmt ")
-	binary.Write(f, binary.LittleEndian, uint32(16))
-	binary.Write(f, binary.LittleEndian, audioFormat)
-	binary.Write(f, binary.LittleEndian, uint16(numChannels))
-	binary.Write(f, binary.LittleEndian, uint32(sampleRate))
-	binary.Write(f, binary.LittleEndian, uint32(byteRate))
-	binary.Write(f, binary.LittleEndian, uint16(blockAlign))
-	binary.Write(f, binary.LittleEndian, uint16(bitsPerSample))
+	if _, err := f.WriteString("fmt "); err != nil {
+		return err
+	}
+	if err := binary.Write(f, binary.LittleEndian, uint32(16)); err != nil {
+		return err
+	}
+	if err := binary.Write(f, binary.LittleEndian, audioFormat); err != nil {
+		return err
+	}
+	if err := binary.Write(f, binary.LittleEndian, uint16(numChannels)); err != nil {
+		return err
+	}
+	if err := binary.Write(f, binary.LittleEndian, uint32(sampleRate)); err != nil {
+		return err
+	}
+	if err := binary.Write(f, binary.LittleEndian, uint32(byteRate)); err != nil {
+		return err
+	}
+	if err := binary.Write(f, binary.LittleEndian, uint16(blockAlign)); err != nil {
+		return err
+	}
+	if err := binary.Write(f, binary.LittleEndian, uint16(bitsPerSample)); err != nil {
+		return err
+	}
 
 	// data sub-chunk
-	f.WriteString("data")
-	binary.Write(f, binary.LittleEndian, uint32(dataSize))
+	if _, err := f.WriteString("data"); err != nil {
+		return err
+	}
+	if err := binary.Write(f, binary.LittleEndian, uint32(dataSize)); err != nil {
+		return err
+	}
 	_, err = f.Write(data)
 	return err
 }
@@ -107,8 +133,8 @@ func ReadWAVParams(path string) (sampleRate int, bitDepth int, pcmFormat int, er
 			return sampleRate, bitDepth, pcmFormat, nil
 		}
 
-		// Skip non-fmt chunks
-		if _, err := f.Seek(int64(chunkSize), 1); err != nil {
+		// Skip non-fmt chunks (WAV spec: odd-size chunks have a padding byte).
+		if _, err := f.Seek(int64(chunkSize)+int64(chunkSize%2), 1); err != nil {
 			return 0, 0, 0, err
 		}
 	}
