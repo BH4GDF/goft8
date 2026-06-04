@@ -50,6 +50,20 @@ func NewDownsampler() *Downsampler {
 	return d
 }
 
+// CloneFrom returns a new Downsampler that shares the pre-computed FFT
+// spectrum (cx) from `src`, avoiding the expensive 192000-point FFT.
+// The clone has its own c1buf and xbuf but reads from src's cached cx.
+// This is safe because Downsample only reads cx (never writes) after the
+// initial FFT computation.
+func CloneFrom(src *Downsampler) *Downsampler {
+	d := &Downsampler{
+		taper: src.taper,
+		cx:    src.cx, // shared read-only reference
+		ready: true,
+	}
+	return d
+}
+
 // Downsample mixes the audio in dd to baseband at f0 Hz, then decimates
 // from 12000 Hz to 200 Hz (NDOWN=60×), returning a complex signal of
 // length NFFT2 (3200 samples).

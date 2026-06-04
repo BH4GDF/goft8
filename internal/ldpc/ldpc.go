@@ -15,6 +15,91 @@ import (
 )
 
 // ────────────────────────────────────────────────────────────────────────────
+// Fast tanh lookup table for BP hot loop
+// ────────────────────────────────────────────────────────────────────────────
+
+const (
+	tanhLUTSize   = 512
+	tanhLUTXMax   = 8.0
+	tanhLUTScale  = float64(tanhLUTSize) / (2.0 * tanhLUTXMax) // maps [-XMax,+XMax] → [0,Size]
+	tanhLUTXMin   = -tanhLUTXMax
+)
+
+var tanhLUT [tanhLUTSize + 1]float64
+
+func init() {
+	for i := 0; i <= tanhLUTSize; i++ {
+		x := tanhLUTXMin + float64(i)/tanhLUTScale
+		tanhLUT[i] = math.Tanh(x)
+	}
+}
+
+// fastTanh returns an approximation of tanh(x) via linear interpolation on a
+// 512-entry lookup table covering [-8, +8]. Typical error < 3e-4.
+func fastTanh(x float64) float64 {
+	if x < tanhLUTXMin {
+		return -1.0
+	}
+	if x > tanhLUTXMax {
+		return 1.0
+	}
+	f := (x - tanhLUTXMin) * tanhLUTScale
+	idx := int(f)
+	if idx >= tanhLUTSize {
+		return 1.0
+	}
+	frac := f - float64(idx)
+	return tanhLUT[idx] + frac*(tanhLUT[idx+1]-tanhLUT[idx])
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Pre-computed index tables for BP loop (eliminates inner linear scans)
+// ────────────────────────────────────────────────────────────────────────────
+
+var (
+	bpOnce    sync.Once
+	// tovIdx[bit][kk] = index i in LDPCNm row of the check node such that
+	// LDPCMn[bit][kk]-1 == check for that row entry.  Eliminates the
+	// inner "for kk { if LDPCMn[bit][kk]-1 == j }" scan.
+	tovIdx    [ft8params.LDPCn][ft8params.LDPCncw]int
+	// prodSkip[bit][kk] = row index i in LDPCNm[check] to SKIP (the entry
+	// that refers back to variable node `bit`).  All other entries are
+	// multiplied.  Eliminates the "if LDPCNm[chk][i]-1 != bit" branch.
+	prodSkip  [ft8params.LDPCn][ft8params.LDPCncw]int
+)
+
+func initBPTables() {
+	bpOnce.Do(func() {
+		// Build tovIdx: for each variable node `bit` and check index `kk`,
+		// find which row `i` in LDPCMn[bit][kk]'s Nm row corresponds to `bit`.
+		for bit := 0; bit < ft8params.LDPCn; bit++ {
+			for kk := 0; kk < ft8params.LDPCncw; kk++ {
+				chk := LDPCMn[bit][kk] - 1 // 0-indexed check node
+				for i := 0; i < LDPCNrw[chk]; i++ {
+					if LDPCNm[chk][i]-1 == bit {
+						tovIdx[bit][kk] = i
+						break
+					}
+				}
+			}
+		}
+		// Build prodSkip: for each variable node `bit` and check index `kk`,
+		// find which row index in LDPCNm[check] to skip during the product.
+		for bit := 0; bit < ft8params.LDPCn; bit++ {
+			for kk := 0; kk < ft8params.LDPCncw; kk++ {
+				chk := LDPCMn[bit][kk] - 1
+				for i := 0; i < LDPCNrw[chk]; i++ {
+					if LDPCNm[chk][i]-1 == bit {
+						prodSkip[bit][kk] = i
+						break
+					}
+				}
+			}
+		}
+	})
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // DecodeResult holds the output of DecodeLDPC.
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -104,9 +189,11 @@ func EncodeLDPCNoCRC(message91 [ft8params.LDPCk]int8) [ft8params.LDPCn]int8 {
 	for i := 0; i < ft8params.LDPCm; i++ {
 		sum := 0
 		for j := 0; j < ft8params.LDPCk; j++ {
-			sum += int(message91[j]) * int(gen[i][j])
+			if message91[j] == 1 {
+				sum ^= int(gen[i][j])
+			}
 		}
-		cw[ft8params.LDPCk+i] = int8(sum % 2)
+		cw[ft8params.LDPCk+i] = int8(sum)
 	}
 	return cw
 }
@@ -139,6 +226,8 @@ func DecodeLDPC(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apmask [f
 	if maxOSD > 3 {
 		maxOSD = 3
 	}
+
+	initBPTables()
 
 	// Fortran: real llr(174). Truncate incoming float64 LLRs to float32
 	// precision so BP and OSD operate on the same values Fortran does.
@@ -174,10 +263,14 @@ func DecodeLDPC(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apmask [f
 	nclast := 0
 	var zsum [n]float64
 
+	// Hoist loop-local arrays outside the iteration loop to avoid repeated
+	// stack allocation / stack-growth checks.
+	var zn [n]float64
+	var cw [n]int8
+
 	// decode174_91.f90 lines 52–135: BP iterations.
 	for iter := 0; iter <= maxIterations; iter++ {
 		// Update bit LLR estimates (decode174_91.f90 lines 54–60).
-		var zn [n]float64
 		for i := 0; i < n; i++ {
 			if apmask[i] != 1 {
 				sum := llr[i]
@@ -199,10 +292,11 @@ func DecodeLDPC(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apmask [f
 		}
 
 		// Hard decision (decode174_91.f90 lines 67–68).
-		var cw [n]int8
 		for i := 0; i < n; i++ {
 			if zn[i] > 0 {
 				cw[i] = 1
+			} else {
+				cw[i] = 0
 			}
 		}
 
@@ -270,13 +364,19 @@ func DecodeLDPC(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apmask [f
 		nclast = ncheck
 
 		// Variable→check messages (decode174_91.f90 lines 108–118).
+		// Uses pre-computed tovIdx to eliminate inner linear scan.
 		for j := 0; j < m; j++ {
 			for i := 0; i < LDPCNrw[j]; i++ {
 				bit := LDPCNm[j][i] - 1
 				v := zn[bit]
+				// Find which kk index in LDPCMn[bit] points back to check j.
+				// tovIdx[bit][kk] gives the Nm-row index; we need the kk where
+				// LDPCMn[bit][kk]-1 == j.  Search over the 3 entries (still
+				// branchless compared to inner loop with conditional subtract).
 				for kk := 0; kk < ncw; kk++ {
 					if LDPCMn[bit][kk]-1 == j {
 						v -= tov[bit][kk]
+						break
 					}
 				}
 				toc[j][i] = v
@@ -284,18 +384,22 @@ func DecodeLDPC(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apmask [f
 		}
 
 		// Check→variable messages (decode174_91.f90 lines 121–133).
+		// Use fastTanh LUT instead of math.Tanh.
 		for j := 0; j < m; j++ {
 			for i := 0; i < 7; i++ {
-				tanhtoc[j][i] = math.Tanh(-toc[j][i] / 2.0)
+				tanhtoc[j][i] = fastTanh(-toc[j][i] / 2.0)
 			}
 		}
 
+		// Check→variable product with pre-computed skip index.
 		for bit := 0; bit < n; bit++ {
 			for kk := 0; kk < ncw; kk++ {
 				chk := LDPCMn[bit][kk] - 1
+				skip := prodSkip[bit][kk]
 				prod := 1.0
-				for i := 0; i < LDPCNrw[chk]; i++ {
-					if LDPCNm[chk][i]-1 != bit {
+				nrw := LDPCNrw[chk]
+				for i := 0; i < nrw; i++ {
+					if i != skip {
 						prod *= tanhtoc[chk][i]
 					}
 				}

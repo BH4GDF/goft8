@@ -50,19 +50,47 @@ func ComputeSymbolSpectra(cd0 []complex128, ibest int) ([8][ft8params.NN]complex
 		}
 
 		// call four2a(csymb,32,1,-1,1)   — 32-point c2c forward FFT
-		cx := make([]complex128, 32)
-		copy(cx, csymb[:])
-		fft32(cx) // in-place radix-2 forward FFT, unnormalized
+		// Operate in-place on the stack-allocated array (no heap allocation).
+		fft32Array(&csymb)
 
 		// cs(0:7,k) = csymb(1:8) / 1e3
 		// s8(0:7,k) = abs(csymb(1:8))
 		//
-		// Fortran csymb(1:8) is 1-indexed → Go cx[0:8] is 0-indexed.
+		// Fortran csymb(1:8) is 1-indexed → Go csymb[0:8] is 0-indexed.
 		// abs() on a complex number = sqrt(re² + im²).
 		for t := 0; t < 8; t++ {
-			cs[t][k-1] = cx[t] * complex(1e-3, 0) // /1e3
-			r, im := real(cx[t]), imag(cx[t])
+			cs[t][k-1] = csymb[t] * complex(1e-3, 0) // /1e3
+			r, im := real(csymb[t]), imag(csymb[t])
 			s8[t][k-1] = math.Sqrt(r*r + im*im) // abs(complex)
+		}
+	}
+
+	return cs, s8
+}
+
+// ComputeSymbolSpectraPower is like ComputeSymbolSpectra but returns squared
+// magnitudes (power) instead of magnitudes. This avoids the expensive sqrt
+// when the caller only needs power values for argmax comparisons.
+func ComputeSymbolSpectraPower(cd0 []complex128, ibest int) ([8][ft8params.NN]complex128, [8][ft8params.NN]float64) {
+	var cs [8][ft8params.NN]complex128
+	var s8 [8][ft8params.NN]float64
+
+	for k := 1; k <= ft8params.NN; k++ {
+		i1 := ibest + (k-1)*32
+
+		var csymb [32]complex128
+		if i1 >= 0 && i1+31 <= ft8params.NP2-1 {
+			for j := 0; j < 32; j++ {
+				csymb[j] = cd0[i1+j]
+			}
+		}
+
+		fft32Array(&csymb)
+
+		for t := 0; t < 8; t++ {
+			cs[t][k-1] = csymb[t] * complex(1e-3, 0)
+			r, im := real(csymb[t]), imag(csymb[t])
+			s8[t][k-1] = r*r + im*im // power, not magnitude
 		}
 	}
 
@@ -89,6 +117,40 @@ func fft32(x []complex128) {
 	}
 	// Cooley-Tukey butterfly stages.
 	// isign = -1 → exp(-j*2*pi/N) per Fortran convention.
+	for stage := 1; stage < n; stage <<= 1 {
+		theta := -math.Pi / float64(stage)
+		wm := complex(math.Cos(theta), math.Sin(theta))
+		for k := 0; k < n; k += stage << 1 {
+			w := complex(1, 0)
+			for jj := 0; jj < stage; jj++ {
+				t := w * x[k+jj+stage]
+				u := x[k+jj]
+				x[k+jj] = u + t
+				x[k+jj+stage] = u - t
+				w *= wm
+			}
+		}
+	}
+}
+
+// fft32Array is an optimized 32-point FFT operating on a fixed-size array.
+// This avoids heap allocation from the slice-based fft32 wrapper.
+func fft32Array(x *[32]complex128) {
+	const n = 32
+	// Bit-reversal permutation.
+	j := 0
+	for i := 0; i < n-1; i++ {
+		if i < j {
+			x[i], x[j] = x[j], x[i]
+		}
+		m := n >> 1
+		for m >= 1 && j >= m {
+			j -= m
+			m >>= 1
+		}
+		j += m
+	}
+	// Cooley-Tukey butterfly stages (5 stages for n=32).
 	for stage := 1; stage < n; stage <<= 1 {
 		theta := -math.Pi / float64(stage)
 		wm := complex(math.Cos(theta), math.Sin(theta))
@@ -250,16 +312,16 @@ func ComputeSoftMetrics(cs *[8][ft8params.NN]complex128) (bmeta, bmetb, bmetc, b
 
 	// MSHV ws300rc1: bmete[i] = best of bmeta/bmetb/bmetc at each position.
 	for i := 0; i < 174; i++ {
-		temp := []float64{bmeta[i], bmetb[i], bmetc[i]}
-		best := 0
-		maxAbs := math.Abs(temp[0])
-		for j := 1; j < 3; j++ {
-			if v := math.Abs(temp[j]); v > maxAbs {
-				best = j
-				maxAbs = v
-			}
+		best := bmeta[i]
+		maxAbs := math.Abs(best)
+		if v := math.Abs(bmetb[i]); v > maxAbs {
+			best = bmetb[i]
+			maxAbs = v
 		}
-		bmete[i] = temp[best]
+		if v := math.Abs(bmetc[i]); v > maxAbs {
+			best = bmetc[i]
+		}
+		bmete[i] = best
 	}
 
 	// Fortran lines 230–233: normalize all five metric arrays.
