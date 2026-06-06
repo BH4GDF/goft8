@@ -51,7 +51,7 @@ func WithDxCall(call string) DecoderOption {
 }
 
 // WithFreqRange restricts the audio frequency search to [min, max] Hz.
-// Defaults to 200..3000 Hz.
+// Defaults to 100..3000 Hz.
 func WithFreqRange(min, max int) DecoderOption {
 	return func(c *decoderConfig) {
 		c.freqMin = min

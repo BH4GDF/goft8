@@ -1,0 +1,11 @@
+# Project MCP snippet for Codex-compatible clients.
+# If your client does not auto-load repository MCP files, copy these tables
+# into ~/.codex/config.toml.
+
+[mcp_servers.goft8-filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/yida/Project/goft8"]
+
+[mcp_servers.goft8-git]
+command = "uvx"
+args = ["mcp-server-git", "--repository", "/home/yida/Project/goft8"]

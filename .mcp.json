@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "goft8-filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/yida/Project/goft8"
+      ]
+    },
+    "goft8-git": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-git",
+        "--repository",
+        "/home/yida/Project/goft8"
+      ]
+    }
+  }
+}

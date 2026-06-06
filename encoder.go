@@ -71,13 +71,13 @@ func clampTxFreq(hz float64) float64 {
 }
 
 // WithSampleRate sets the output sample rate in Hz.
-// Supported values are 12000 (default) and 48000.
+// Supported values are 12000 and 48000. Defaults to 48000.
 func WithSampleRate(sr int) EncoderOption {
 	return func(c *encoderConfig) { c.sampleRate = sr }
 }
 
 // WithBitDepth sets the output PCM bit depth.
-// Supported values are 16 (default), 24, and 32.
+// Supported values are 16, 24, and 32. Defaults to 24.
 func WithBitDepth(bits int) EncoderOption {
 	return func(c *encoderConfig) { c.bitDepth = bits }
 }
@@ -98,6 +98,23 @@ func (e *Encoder) txSamples() int {
 	return nwave
 }
 
+func (e *Encoder) validateSampleRate() error {
+	if e.cfg.sampleRate != 12000 && e.cfg.sampleRate != 48000 {
+		return fmt.Errorf("ft8: unsupported sample rate %d (want 12000 or 48000)", e.cfg.sampleRate)
+	}
+	return nil
+}
+
+func (e *Encoder) validatePCMConfig() error {
+	if err := e.validateSampleRate(); err != nil {
+		return err
+	}
+	if e.cfg.bitDepth != 16 && e.cfg.bitDepth != 24 && e.cfg.bitDepth != 32 {
+		return fmt.Errorf("ft8: unsupported bit depth %d (want 16, 24, or 32)", e.cfg.bitDepth)
+	}
+	return nil
+}
+
 // encodeBufPool reuses the txSamples-length buffers needed by
 // EncodeMulti.  Each goroutine borrows its own.
 var encodeBufPool = sync.Pool{
@@ -109,6 +126,10 @@ var encodeBufPool = sync.Pool{
 // Encode generates the GFSK-modulated waveform for a single FT8
 // message. Returns float32 samples at the configured sample rate.
 func (e *Encoder) Encode(msg string) ([]float32, error) {
+	if err := e.validateSampleRate(); err != nil {
+		return nil, err
+	}
+
 	bits, _, _, ok := protocol.Pack77(msg)
 	if !ok {
 		return nil, fmt.Errorf("ft8: cannot pack message %q", msg)
@@ -132,6 +153,9 @@ func (e *Encoder) Encode(msg string) ([]float32, error) {
 func (e *Encoder) EncodeMulti(msgs []MessageFreq) ([]float32, error) {
 	if len(msgs) == 0 {
 		return nil, fmt.Errorf("ft8: no messages to encode")
+	}
+	if err := e.validateSampleRate(); err != nil {
+		return nil, err
 	}
 
 	nsamples := e.txSamples()
@@ -238,6 +262,10 @@ func (e *Encoder) EncodeMulti(msgs []MessageFreq) ([]float32, error) {
 // EncodeToBytes generates the waveform and converts it to raw PCM bytes
 // at the configured sample rate and bit depth.
 func (e *Encoder) EncodeToBytes(msg string) ([]byte, error) {
+	if err := e.validatePCMConfig(); err != nil {
+		return nil, err
+	}
+
 	wave, err := e.Encode(msg)
 	if err != nil {
 		return nil, err

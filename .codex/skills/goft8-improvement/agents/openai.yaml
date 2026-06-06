@@ -1,0 +1,4 @@
+interface:
+  display_name: "GoFT8 Improvement"
+  short_description: "Guide goft8 quality and performance work"
+  default_prompt: "Use $goft8-improvement to plan and implement a goft8 improvement task."
