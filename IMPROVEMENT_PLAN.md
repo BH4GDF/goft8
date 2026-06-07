@@ -11,6 +11,7 @@
 - 新增微基准：`BenchmarkGetSpectrumBaselineSerial` 约 `5.01 ms/op, 24 B/op`；`BenchmarkOSDDecodeOrder3Clean` 约 `1.45 ms/op, 0 allocs/op`。
 - `EncodeMulti` 二轮池化后：`BenchmarkEncoderEncodeMulti2_12k` 约 `1.75-1.85 ms/op, 0.64-0.69 MB/op`；`BenchmarkEncoderEncodeMulti2_48k` 约 `7.14-7.56 ms/op, 7.4 MB/op`（`-benchtime=50x -count=3`）。
 - 编码池化三轮后：`BenchmarkEncoderEncodeToBytes` 约 `1.83 MB/op, 3 allocs/op`；`BenchmarkEncoderEncodeMulti2_48k` 约 `2.43 MB/op, 13 allocs/op`。
+- 解码 metrics 优化后：新增 `BenchmarkComputeSymbolSpectra`、`BenchmarkComputeSoftMetrics`、`BenchmarkSync8d`、`BenchmarkHardSync`；`BenchmarkComputeSoftMetrics` 从 `132-151 us/op` 降到 `21.9-25.2 us/op`，保持 `0 allocs/op`（`-benchtime=500x -count=10`）。
 - 当前状态：P0、P1、P2、P3、P4、P5 已完成首轮实现。
 
 ## 主要可改进项
