@@ -13,6 +13,11 @@ import (
 	"sync"
 )
 
+var (
+	nuttallWindowCache []float64
+	nuttallWindowOnce  sync.Once
+)
+
 // fftBufPool caches float32 slices used as FFT input buffers.
 // Key sizes: NSPS=1920 (spectrogram) and NFFT1=3840 (baseline).
 var fftBufPool = sync.Pool{
@@ -97,8 +102,9 @@ func NumWorkers(workers int) int {
 //
 // Index 0 is allocated but unused.
 type Spectrogram struct {
-	S    [][]float64 // power: s[freq][time], 1-indexed, padded in freq
-	Savg []float64   // average spectrum across all time steps, 1-indexed
+	S       [][]float64 // power: s[freq][time], 1-indexed, padded in freq
+	Savg    []float64   // average spectrum across all time steps, 1-indexed
+	backing []float64
 }
 
 // ── Sync8 — top-level entry point ────────────────────────────────────────
@@ -135,12 +141,21 @@ func Sync8(dd [ft8params.NMAX]float32, npts int, nfa, nfb int, syncmin float64, 
 
 	// ── Step 2: 2D Costas correlation (sync8.f90 lines 53–84) ────────
 	sync2d := computeSync2D(spec, nfa, nfb, df, nssy, nfos, jstrt, workers)
+	releaseSpectrogram(spec)
 	if sync2d != nil {
 		defer sync2dPool.Put(sync2d)
 	}
 
 	// ── Step 3: Peak finding (sync8.f90 lines 86–98) ─────────────────
-	jpeak, red, jpeak2, red2 := findPeaks(sync2d, nfa, nfb, df)
+	var jpeakBuf [ft8params.NH1 + 1]int
+	var redBuf [ft8params.NH1 + 1]float64
+	var jpeak2Buf [ft8params.NH1 + 1]int
+	var red2Buf [ft8params.NH1 + 1]float64
+	jpeak := jpeakBuf[:]
+	red := redBuf[:]
+	jpeak2 := jpeak2Buf[:]
+	red2 := red2Buf[:]
+	findPeaksInto(jpeak, red, jpeak2, red2, sync2d, nfa, nfb, df)
 
 	// ── Step 4: 40th-percentile normalization (sync8.f90 lines 99–116)
 	indx := normalizeByPercentile(red, red2, nfa, nfb, df)
@@ -236,7 +251,7 @@ func computeSpectrogram(dd []float32, npts int, workers int) *Spectrogram {
 			}
 		}
 		fftBufPool.Put(buf[:cap(buf)])
-		return &Spectrogram{S: s, Savg: savg}
+		return &Spectrogram{S: s, Savg: savg, backing: backing}
 	}
 
 	nw := workers
@@ -289,7 +304,21 @@ func computeSpectrogram(dd []float32, npts int, workers int) *Spectrogram {
 		}
 	}
 
-	return &Spectrogram{S: s, Savg: savg}
+	return &Spectrogram{S: s, Savg: savg, backing: backing}
+}
+
+func releaseSpectrogram(spec *Spectrogram) {
+	if spec == nil {
+		return
+	}
+	if spec.backing != nil {
+		specBackingPool.Put(spec.backing)
+		spec.backing = nil
+	}
+	if spec.Savg != nil {
+		specSavgPool.Put(spec.Savg)
+		spec.Savg = nil
+	}
 }
 
 // ComputeSpectrogramForTest exposes computeSpectrogram for testing.
@@ -316,20 +345,14 @@ func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [ft8params.NH1
 		NST = ft8params.NFFT1 / 2 // 960
 	)
 
-	window := nuttallWindow(ft8params.NFFT1)
-	summ := 0.0
-	for _, v := range window {
-		summ += v
-	}
-	summ = summ * float64(ft8params.NSPS) * 2.0 / 300.0
-	for i := range window {
-		window[i] /= summ
-	}
+	window := normalizedNuttallWindow()
 
 	savg := make([]float64, ft8params.NH1)
 
 	if workers <= 1 {
 		// Serial path
+		x := fftBufPool.Get().([]float32)
+		x = x[:ft8params.NFFT1]
 		for j := 0; j < NF; j++ {
 			ia := j * NST
 			ib := ia + ft8params.NFFT1 - 1
@@ -337,10 +360,11 @@ func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [ft8params.NH1
 				break
 			}
 
-			x := make([]float32, ft8params.NFFT1)
 			for z := 0; z < ft8params.NFFT1; z++ {
 				if ia+z < len(dd) {
 					x[z] = float32(float64(dd[ia+z]) * window[z])
+				} else {
+					x[z] = 0
 				}
 			}
 
@@ -349,6 +373,7 @@ func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [ft8params.NH1
 				savg[i] += pow[i]
 			}
 		}
+		fftBufPool.Put(x[:cap(x)])
 	} else {
 		// Parallel path: split NF segments across workers.
 		nw := workers
@@ -418,6 +443,22 @@ func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [ft8params.NH1
 	return result
 }
 
+func normalizedNuttallWindow() []float64 {
+	nuttallWindowOnce.Do(func() {
+		window := nuttallWindow(ft8params.NFFT1)
+		summ := 0.0
+		for _, v := range window {
+			summ += v
+		}
+		summ = summ * float64(ft8params.NSPS) * 2.0 / 300.0
+		for i := range window {
+			window[i] /= summ
+		}
+		nuttallWindowCache = window
+	})
+	return nuttallWindowCache
+}
+
 // nuttallWindow generates a 4-term Nuttall window of length n.
 func nuttallWindow(n int) []float64 {
 	const (
@@ -465,6 +506,7 @@ func baseline(s []float64, nfa, nfb int) []float64 {
 
 	x := make([]float64, 0, 1000)
 	y := make([]float64, 0, 1000)
+	segScratch := make([]float64, nlen)
 
 	for n := 0; n < nseg; n++ {
 		ja := ia + n*nlen
@@ -475,9 +517,9 @@ func baseline(s []float64, nfa, nfb int) []float64 {
 		if ja >= jb {
 			continue
 		}
-		seg := make([]float64, jb-ja)
+		seg := segScratch[:jb-ja]
 		copy(seg, s[ja:jb])
-		base := percentile(seg, float64(npct))
+		base := percentileInPlace(seg, float64(npct))
 		for i := ja; i < jb; i++ {
 			if s[i] <= base {
 				x = append(x, float64(i-i0))
@@ -532,6 +574,10 @@ func baseline(s []float64, nfa, nfb int) []float64 {
 func percentile(data []float64, p float64) float64 {
 	sorted := make([]float64, len(data))
 	copy(sorted, data)
+	return percentileInPlace(sorted, p)
+}
+
+func percentileInPlace(sorted []float64, p float64) float64 {
 	sort.Float64s(sorted)
 	idx := int(math.Round(p / 100.0 * float64(len(sorted)-1)))
 	if idx < 0 {
@@ -854,16 +900,24 @@ func computeSync2D(spec *Spectrogram, nfa, nfb int, df float64, nssy, nfos, jstr
 //	jpeak2[i] = lag of max sync2d within ±JZ (wide search)
 //	red2[i]   = sync2d at jpeak2[i]
 func findPeaks(sync2d [][]float64, nfa, nfb int, df float64) (jpeak []int, red []float64, jpeak2 []int, red2 []float64) {
-	if sync2d == nil {
-		return make([]int, ft8params.NH1+1), make([]float64, ft8params.NH1+1),
-			make([]int, ft8params.NH1+1), make([]float64, ft8params.NH1+1)
-	}
-
-	// sync8.f90 lines 87–88: initialize to zero
 	jpeak = make([]int, ft8params.NH1+1)
 	red = make([]float64, ft8params.NH1+1)
 	jpeak2 = make([]int, ft8params.NH1+1)
 	red2 = make([]float64, ft8params.NH1+1)
+	findPeaksInto(jpeak, red, jpeak2, red2, sync2d, nfa, nfb, df)
+	return
+}
+
+func findPeaksInto(jpeak []int, red []float64, jpeak2 []int, red2 []float64, sync2d [][]float64, nfa, nfb int, df float64) {
+	if sync2d == nil {
+		return
+	}
+
+	// sync8.f90 lines 87–88: initialize to zero
+	clear(jpeak)
+	clear(red)
+	clear(jpeak2)
+	clear(red2)
 
 	// sync8.f90 lines 46–47: recompute freq bin bounds (same as computeSync2D)
 	iaFreq := int(math.Round(float64(nfa) / df))
@@ -908,8 +962,6 @@ func findPeaks(sync2d [][]float64, nfa, nfb int, df float64) (jpeak []int, red [
 		jpeak2[i] = bestJ2
 		red2[i] = bestV2
 	}
-
-	return
 }
 
 // ── Step 4: 40th-percentile normalization ────────────────────────────────

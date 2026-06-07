@@ -201,11 +201,12 @@ func ComputeSoftMetrics(cs *[8][ft8params.NN]complex128) (bmeta, bmetb, bmetc, b
 
 	// Fortran: data graymap/0,1,3,2,5,6,4,7/
 	graymap := ft8params.GrayMap
+	var s2buf [512]float64
 
 	for nsym := 1; nsym <= 3; nsym++ {
 		nt := 1 << (3 * nsym) // 8, 64, 512
 
-		s2 := make([]float64, nt)
+		s2 := s2buf[:nt]
 
 		for ihalf := 1; ihalf <= 2; ihalf++ {
 			for k := 1; k <= 29; k += nsym {

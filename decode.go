@@ -619,6 +619,7 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 				go func() {
 					defer wg.Done()
 					ds := decode.CloneFrom(sharedDS)
+					defer ds.Release()
 					for job := range jobs {
 						res, ok := DecodeSingle(dd, ds, job.cand.Freq, job.cand.DT, false, passParams, job.xbase)
 						if ok {
@@ -646,6 +647,7 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 			}
 			close(jobs)
 			wg.Wait()
+			sharedDS.Release()
 
 			var toSubtract []decode.SubtractSignal
 			for i := range candidates {
@@ -727,6 +729,7 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 				// Use unadjusted DT for subtraction (result.DT has been adjusted, add 0.5 back)
 				decode.SubtractFT8(dd, result.Tones, result.Freq, result.DT+0.5)
 			}
+			ds.Release()
 		}
 
 		prevPassDecodes = passDecodes
