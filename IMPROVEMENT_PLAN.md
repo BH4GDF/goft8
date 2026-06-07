@@ -6,7 +6,7 @@
 
 - `go test ./...` 通过。
 - `go test -race ./...` 通过。
-- `go test -cover ./...`：根包覆盖率约 `54.2%`；`internal/encode` 约 `81.2%`，`internal/dsp` 约 `38.7%`，`internal/protocol` 约 `32.4%`，`internal/ldpc` 约 `7.9%`。
+- `go test -cover ./...`：根包覆盖率约 `61.5%`；`internal/decode` 约 `15.4%`，`internal/encode` 约 `81.2%`，`internal/dsp` 约 `38.7%`，`internal/protocol` 约 `39.6%`，`internal/ldpc` 约 `7.9%`。
 - 代表性 benchmark：`BenchmarkEncoderEncode` 约 `6.65 ms/op, 7.4 MB/op`；`BenchmarkDecodeWAVCap1` 首轮优化后约 `486 ms/op, 40 MB/op`。
 - 当前状态：P0、P1、P2、P3、P4、P5 已完成首轮实现。
 
