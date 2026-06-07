@@ -14,32 +14,10 @@ var (
 )
 
 func benchmarkLLR(strength float64) [ft8params.LDPCn]float64 {
-	var msg [77]int8
-	for i := range msg {
-		if i%5 == 0 || i%11 == 0 {
-			msg[i] = 1
-		}
-	}
-
-	crc := ComputeCRC14(msg)
-	var message91 [ft8params.LDPCk]int8
-	copy(message91[:77], msg[:])
-	for i := 0; i < 14; i++ {
-		message91[77+i] = int8((crc >> uint(13-i)) & 1)
-	}
-
-	cw := EncodeLDPCNoCRC(message91)
-	var llr [ft8params.LDPCn]float64
-	for i, bit := range cw {
-		if bit == 1 {
-			llr[i] = strength
-		} else {
-			llr[i] = -strength
-		}
-	}
-	benchmarkMessage91 = message91
-	benchmarkCodeword = cw
-	return llr
+	vector := testLDPCVector(strength)
+	benchmarkMessage91 = vector.message91
+	benchmarkCodeword = vector.codeword
+	return vector.llr
 }
 
 func BenchmarkDecodeLDPCCleanBP(b *testing.B) {
