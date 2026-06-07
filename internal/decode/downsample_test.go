@@ -1,6 +1,7 @@
 package decode
 
 import (
+	"math/cmplx"
 	"testing"
 
 	ft8params "github.com/bh4gdf/goft8/params"
@@ -42,5 +43,87 @@ func TestDownsamplerReleaseClearsReusableBuffers(t *testing.T) {
 	ds.Release()
 	if ds.cx != nil || ds.c1buf != nil || ds.xbuf != nil || ds.ready {
 		t.Fatal("Release did not clear source buffers")
+	}
+}
+
+func TestCshiftHandlesPositiveNegativeAndEmptyShifts(t *testing.T) {
+	in := []complex128{1, 2, 3, 4}
+
+	tests := []struct {
+		name  string
+		shift int
+		want  []complex128
+	}{
+		{"zero", 0, []complex128{1, 2, 3, 4}},
+		{"positive", 1, []complex128{2, 3, 4, 1}},
+		{"negative", -1, []complex128{4, 1, 2, 3}},
+		{"wrapped", 5, []complex128{2, 3, 4, 1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Cshift(in, tt.shift)
+			assertComplexSlice(t, got, tt.want)
+
+			inPlace := append([]complex128(nil), in...)
+			CshiftInPlace(inPlace, tt.shift)
+			assertComplexSlice(t, inPlace, tt.want)
+		})
+	}
+
+	var empty []complex128
+	if got := Cshift(empty, 3); len(got) != 0 {
+		t.Fatalf("Cshift(empty) length = %d", len(got))
+	}
+	CshiftInPlace(empty, 3)
+}
+
+func TestTwkFreq1ZeroCoefficientsIsIdentity(t *testing.T) {
+	in := []complex128{1, complex(0.5, -0.25), -1, complex(0, 2)}
+	var coeffs [5]float64
+
+	got := TwkFreq1(in, 200, coeffs)
+	assertComplexSliceApprox(t, got, in, 1e-12)
+
+	dst := make([]complex128, len(in))
+	TwkFreq1Into(dst, in, 200, coeffs)
+	assertComplexSliceApprox(t, dst, in, 1e-12)
+}
+
+func TestTwkFreq1AppliesPrimaryFrequencyCorrection(t *testing.T) {
+	in := []complex128{1, 1, 1, 1}
+	coeffs := [5]float64{25}
+
+	got := TwkFreq1(in, 100, coeffs)
+
+	for i := 1; i < len(got); i++ {
+		ratio := got[i] / got[i-1]
+		if cmplx.Abs(ratio-complex(0, 1)) > 1e-12 {
+			t.Fatalf("step ratio[%d] = %v, want +j", i, ratio)
+		}
+	}
+}
+
+func assertComplexSlice(t *testing.T, got, want []complex128) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("value[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func assertComplexSliceApprox(t *testing.T, got, want []complex128, tol float64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	for i := range got {
+		if cmplx.Abs(got[i]-want[i]) > tol {
+			t.Fatalf("value[%d] = %v, want %v", i, got[i], want[i])
+		}
 	}
 }
