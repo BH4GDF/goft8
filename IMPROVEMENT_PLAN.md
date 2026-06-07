@@ -9,6 +9,7 @@
 - `go test -cover ./...`：根包覆盖率约 `61.5%`；`internal/decode` 约 `15.4%`，`internal/encode` 约 `81.2%`，`internal/dsp` 约 `38.7%`，`internal/protocol` 约 `39.6%`，`internal/ldpc` 约 `7.9%`。
 - 代表性 benchmark：`BenchmarkEncoderEncode` 约 `6.65 ms/op, 7.4 MB/op`；`BenchmarkDecodeWAVCap1` 首轮优化后约 `486 ms/op, 40 MB/op`，二轮 decode/LDPC 分配优化后约 `475-492 ms/op, 31.5-32.8 MB/op, 810-857 allocs/op`（`-benchtime=5x -count=3`）。
 - 新增微基准：`BenchmarkGetSpectrumBaselineSerial` 约 `5.01 ms/op, 24 B/op`；`BenchmarkOSDDecodeOrder3Clean` 约 `1.45 ms/op, 0 allocs/op`。
+- `EncodeMulti` 二轮池化后：`BenchmarkEncoderEncodeMulti2_12k` 约 `1.75-1.85 ms/op, 0.64-0.69 MB/op`；`BenchmarkEncoderEncodeMulti2_48k` 约 `7.14-7.56 ms/op, 7.4 MB/op`（`-benchtime=50x -count=3`）。
 - 当前状态：P0、P1、P2、P3、P4、P5 已完成首轮实现。
 
 ## 主要可改进项

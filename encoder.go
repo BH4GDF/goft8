@@ -231,10 +231,17 @@ func (e *Encoder) EncodeMulti(msgs []MessageFreq) ([]float32, error) {
 		go func(idx int, j waveJob) {
 			defer wg.Done()
 			itone := encode.GenFT8Tones(j.bits)
-			waves[idx] = encode.GenFT8WaveSR(itone, j.f0, e.cfg.sampleRate)
+			wave := encodeBufGet(e.cfg.sampleRate)[:nsamples]
+			encode.GenFT8WaveInto(wave, itone, j.f0, e.cfg.sampleRate)
+			waves[idx] = wave
 		}(i, job)
 	}
 	wg.Wait()
+	defer func() {
+		for _, wave := range waves {
+			encodeBufPut(e.cfg.sampleRate, wave)
+		}
+	}()
 
 	// Accumulate waveforms. For 3+ messages use parallel reduction over
 	// segments of the sample buffer to saturate memory bandwidth.

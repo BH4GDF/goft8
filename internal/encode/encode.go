@@ -244,11 +244,20 @@ func GenFT8Wave(itone [ft8params.NN]int, f0 float64) []float32 {
 // GenFT8WaveSR generates the real-valued GFSK waveform at an arbitrary
 // sample rate.  Supported rates are 12000 and 48000 Hz.
 func GenFT8WaveSR(itone [ft8params.NN]int, f0 float64, sampleRate int) []float32 {
+	_, nwave, _ := EncodeParams(sampleRate)
+	wave := make([]float32, nwave)
+	GenFT8WaveInto(wave, itone, f0, sampleRate)
+	return wave
+}
+
+// GenFT8WaveInto writes the real-valued GFSK waveform into dst.
+// dst must have length at least the frame length for sampleRate.
+func GenFT8WaveInto(dst []float32, itone [ft8params.NN]int, f0 float64, sampleRate int) {
 	nsps, nwave, _ := EncodeParams(sampleRate)
+	wave := dst[:nwave]
 	dphi := GenFT8DPhi(itone, f0, sampleRate)
 	defer PutDPhi(dphi)
 
-	wave := make([]float32, nwave)
 	phi := 0.0
 	for k := 0; k < nwave; k++ {
 		j := nsps + k
@@ -268,6 +277,4 @@ func GenFT8WaveSR(itone [ft8params.NN]int, f0 float64, sampleRate int) []float32
 		ramp := float32((1.0 + math.Cos(encodeTwopi*float64(i)/float64(2*nramp))) / 2.0)
 		wave[k1+i] *= ramp
 	}
-
-	return wave
 }

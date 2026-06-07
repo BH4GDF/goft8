@@ -75,3 +75,40 @@ func TestEncoderMulti48kLength(t *testing.T) {
 		t.Fatalf("waveform length %d, want %d", len(waveform), want)
 	}
 }
+
+func TestEncoderMultiReturnsIndependentWaveform(t *testing.T) {
+	enc := NewEncoder(WithSampleRate(12000))
+	msgs := []MessageFreq{
+		{Message: "CQ BH4GDF PM00", Freq: 1200},
+		{Message: "BH4GDF BH4HKZ -10", Freq: 1800},
+	}
+
+	first, err := enc.EncodeMulti(msgs)
+	if err != nil {
+		t.Fatalf("EncodeMulti first call failed: %v", err)
+	}
+	second, err := enc.EncodeMulti(msgs)
+	if err != nil {
+		t.Fatalf("EncodeMulti second call failed: %v", err)
+	}
+	if len(first) != len(second) {
+		t.Fatalf("waveform lengths differ: %d vs %d", len(first), len(second))
+	}
+	for i := range first {
+		if first[i] != second[i] {
+			t.Fatalf("waveforms differ at sample %d: %g vs %g", i, first[i], second[i])
+		}
+	}
+
+	first[0] = 99
+	third, err := enc.EncodeMulti(msgs)
+	if err != nil {
+		t.Fatalf("EncodeMulti third call failed: %v", err)
+	}
+	if third[0] == first[0] {
+		t.Fatal("EncodeMulti returned a pooled buffer alias")
+	}
+	if third[0] != second[0] {
+		t.Fatalf("third waveform sample 0 = %g, want %g", third[0], second[0])
+	}
+}
