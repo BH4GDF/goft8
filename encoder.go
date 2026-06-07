@@ -115,25 +115,49 @@ func (e *Encoder) validatePCMConfig() error {
 	return nil
 }
 
-// encodeBufPools reuse the txSamples-length accumulation buffers needed by
-// EncodeMulti. Keep one pool per supported sample rate so 48 kHz calls do not
-// repeatedly allocate and then return truncated 12 kHz buffers.
-var encodeBufPools = map[int]*sync.Pool{
-	12000: {
-		New: func() interface{} {
-			return make([]float32, NTXSamples)
-		},
-	},
-	48000: {
-		New: func() interface{} {
-			return make([]float32, NTXSamples*4)
-		},
-	},
+// encodeBufPools reuse txSamples-length buffers needed by EncodeMulti and
+// EncodeToBytes. Keep one bounded persistent pool per supported sample rate so
+// large 48 kHz buffers survive GC without retaining unbounded memory.
+var encodeBufPools = map[int]*encodeBufferPool{
+	12000: newEncodeBufferPool(NTXSamples),
+	48000: newEncodeBufferPool(NTXSamples * 4),
+}
+
+type encodeBufferPool struct {
+	size int
+	ch   chan []float32
+}
+
+func newEncodeBufferPool(size int) *encodeBufferPool {
+	return &encodeBufferPool{
+		size: size,
+		ch:   make(chan []float32, 4),
+	}
+}
+
+func (p *encodeBufferPool) get() []float32 {
+	select {
+	case buf := <-p.ch:
+		return buf[:p.size]
+	default:
+		return make([]float32, p.size)
+	}
+}
+
+func (p *encodeBufferPool) put(buf []float32) {
+	if cap(buf) < p.size {
+		return
+	}
+	buf = buf[:p.size]
+	select {
+	case p.ch <- buf:
+	default:
+	}
 }
 
 func encodeBufGet(sampleRate int) []float32 {
 	pool := encodeBufPools[sampleRate]
-	return pool.Get().([]float32)
+	return pool.get()
 }
 
 func encodeBufPut(sampleRate int, buf []float32) {
@@ -141,14 +165,7 @@ func encodeBufPut(sampleRate int, buf []float32) {
 	if pool == nil {
 		return
 	}
-	want := NTXSamples
-	if sampleRate == 48000 {
-		want *= 4
-	}
-	if cap(buf) < want {
-		return
-	}
-	pool.Put(buf[:want])
+	pool.put(buf)
 }
 
 // Encode generates the GFSK-modulated waveform for a single FT8
@@ -298,10 +315,19 @@ func (e *Encoder) EncodeToBytes(msg string) ([]byte, error) {
 		return nil, err
 	}
 
-	wave, err := e.Encode(msg)
-	if err != nil {
-		return nil, err
+	bits, _, _, ok := protocol.Pack77(msg)
+	if !ok {
+		return nil, fmt.Errorf("ft8: cannot pack message %q", msg)
 	}
+
+	nsamples := e.txSamples()
+	wave := encodeBufGet(e.cfg.sampleRate)[:nsamples]
+	defer encodeBufPut(e.cfg.sampleRate, wave)
+
+	itone := encode.GenFT8Tones(bits)
+	f0 := clampTxFreq(e.cfg.txFreq)
+	encode.GenFT8WaveInto(wave, itone, f0, e.cfg.sampleRate)
+
 	return FloatToPCM(wave, e.cfg.bitDepth), nil
 }
 
@@ -309,16 +335,27 @@ func (e *Encoder) EncodeToBytes(msg string) ([]byte, error) {
 func FloatToPCM(samples []float32, bitDepth int) []byte {
 	switch bitDepth {
 	case 24:
-		return floatToPCM24(samples)
+		data := make([]byte, len(samples)*3)
+		floatToPCM24Into(data, samples)
+		return data
 	case 32:
-		return floatToPCM32(samples)
+		data := make([]byte, len(samples)*4)
+		floatToPCM32Into(data, samples)
+		return data
 	default:
-		return floatToPCM16(samples)
+		data := make([]byte, len(samples)*2)
+		floatToPCM16Into(data, samples)
+		return data
 	}
 }
 
 func floatToPCM16(samples []float32) []byte {
 	data := make([]byte, len(samples)*2)
+	floatToPCM16Into(data, samples)
+	return data
+}
+
+func floatToPCM16Into(data []byte, samples []float32) {
 	for i, v := range samples {
 		if v > 1.0 {
 			v = 1.0
@@ -328,11 +365,15 @@ func floatToPCM16(samples []float32) []byte {
 		s := int16(v * 32767.0)
 		binary.LittleEndian.PutUint16(data[i*2:], uint16(s))
 	}
-	return data
 }
 
 func floatToPCM24(samples []float32) []byte {
 	data := make([]byte, len(samples)*3)
+	floatToPCM24Into(data, samples)
+	return data
+}
+
+func floatToPCM24Into(data []byte, samples []float32) {
 	for i, v := range samples {
 		if v > 1.0 {
 			v = 1.0
@@ -351,11 +392,15 @@ func floatToPCM24(samples []float32) []byte {
 		data[i*3+1] = byte((s >> 8) & 0xFF)
 		data[i*3+2] = byte((s >> 16) & 0xFF)
 	}
-	return data
 }
 
 func floatToPCM32(samples []float32) []byte {
 	data := make([]byte, len(samples)*4)
+	floatToPCM32Into(data, samples)
+	return data
+}
+
+func floatToPCM32Into(data []byte, samples []float32) {
 	for i, v := range samples {
 		if v > 1.0 {
 			v = 1.0
@@ -365,5 +410,4 @@ func floatToPCM32(samples []float32) []byte {
 		s := int32(v * 2147483647.0)
 		binary.LittleEndian.PutUint32(data[i*4:], uint32(s))
 	}
-	return data
 }

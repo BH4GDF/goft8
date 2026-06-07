@@ -166,28 +166,64 @@ func PutDPhi(dphi []float64) {
 	dphiPoolPut(dphi)
 }
 
-// dphiPool reuses the large dphi buffers (~1.2 MB each).
-var dphiPool = sync.Pool{
-	New: func() interface{} {
-		return make([]float64, (ft8params.NN+2)*ft8params.NSPS)
-	},
+// dphiPool reuses large dphi buffers with bounded retention. The 48 kHz
+// variant is about 4x the 12 kHz buffer, so keep separate pools by length.
+var dphiPools = []*dphiBufferPool{
+	newDphiBufferPool((ft8params.NN + 2) * ft8params.NSPS),
+	newDphiBufferPool((ft8params.NN + 2) * ft8params.NSPS * 4),
 }
 
-func dphiPoolGet(n int) []float64 {
-	buf := dphiPool.Get().([]float64)
-	if cap(buf) < n {
-		dphiPool.Put(buf)
-		return make([]float64, n)
+type dphiBufferPool struct {
+	size int
+	ch   chan []float64
+}
+
+func newDphiBufferPool(size int) *dphiBufferPool {
+	return &dphiBufferPool{
+		size: size,
+		ch:   make(chan []float64, 4),
 	}
-	return buf[:n]
 }
 
-func dphiPoolPut(buf []float64) {
-	// Zero the buffer before returning to pool to avoid stale data.
+func (p *dphiBufferPool) get() []float64 {
+	select {
+	case buf := <-p.ch:
+		return buf[:p.size]
+	default:
+		return make([]float64, p.size)
+	}
+}
+
+func (p *dphiBufferPool) put(buf []float64) {
+	if cap(buf) < p.size {
+		return
+	}
+	buf = buf[:p.size]
 	for i := range buf {
 		buf[i] = 0
 	}
-	dphiPool.Put(buf)
+	select {
+	case p.ch <- buf:
+	default:
+	}
+}
+
+func dphiPoolGet(n int) []float64 {
+	for _, pool := range dphiPools {
+		if pool.size >= n {
+			return pool.get()[:n]
+		}
+	}
+	return make([]float64, n)
+}
+
+func dphiPoolPut(buf []float64) {
+	for _, pool := range dphiPools {
+		if cap(buf) == pool.size {
+			pool.put(buf)
+			return
+		}
+	}
 }
 
 // GenFT8CWave generates the complex GFSK reference waveform for a signal
