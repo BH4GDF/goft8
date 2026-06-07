@@ -347,7 +347,7 @@ func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [ft8params.NH1
 
 	window := normalizedNuttallWindow()
 
-	savg := make([]float64, ft8params.NH1)
+	var savg [ft8params.NH1]float64
 
 	if workers <= 1 {
 		// Serial path
@@ -378,10 +378,7 @@ func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [ft8params.NH1
 		// Parallel path: split NF segments across workers.
 		nw := workers
 		chunkSize := (NF + nw - 1) / nw
-		localSavgs := make([][]float64, nw)
-		for w := 0; w < nw; w++ {
-			localSavgs[w] = make([]float64, ft8params.NH1)
-		}
+		localSavgs := make([][ft8params.NH1]float64, nw)
 		var wg sync.WaitGroup
 		for w := 0; w < nw; w++ {
 			start := w * chunkSize
@@ -428,18 +425,8 @@ func getSpectrumBaseline(dd []float32, nfa, nfb int, workers int) [ft8params.NH1
 		}
 	}
 
-	minS, maxS := 1e9, -1e9
-	for _, v := range savg {
-		if v < minS {
-			minS = v
-		}
-		if v > maxS {
-			maxS = v
-		}
-	}
-	sbase := baseline(savg, nfa, nfb)
 	var result [ft8params.NH1]float64
-	copy(result[:], sbase)
+	baselineInto(result[:], savg[:], nfa, nfb)
 	return result
 }
 
@@ -478,6 +465,16 @@ func nuttallWindow(n int) []float64 {
 // baseline fits a low-order polynomial to the noise floor of a spectrum.
 // Port of MSHV's baseline() (from decoderft8.cpp).
 func baseline(s []float64, nfa, nfb int) []float64 {
+	sbase := make([]float64, len(s))
+	baselineInto(sbase, s, nfa, nfb)
+	return sbase
+}
+
+func baselineInto(sbase, s []float64, nfa, nfb int) {
+	for i := range sbase {
+		sbase[i] = 0
+	}
+
 	df := ft8params.Fs / float64(ft8params.NFFT1)
 	ia := int(math.Max(0, float64(nfa)/df))
 	ib := int(float64(nfb) / df)
@@ -504,9 +501,18 @@ func baseline(s []float64, nfa, nfb int) []float64 {
 	}
 	i0 := (ib - ia) / 2
 
-	x := make([]float64, 0, 1000)
-	y := make([]float64, 0, 1000)
-	segScratch := make([]float64, nlen)
+	const baselinePointCap = 256
+	const baselineSegmentCap = ft8params.NH1/10 + 2
+	var xBuf [baselinePointCap]float64
+	var yBuf [baselinePointCap]float64
+	var xNormBuf [baselinePointCap]float64
+	var segScratchBuf [baselineSegmentCap]float64
+	x := xBuf[:0]
+	y := yBuf[:0]
+	segScratch := segScratchBuf[:]
+	if nlen > len(segScratchBuf) {
+		segScratch = make([]float64, nlen)
+	}
 
 	for n := 0; n < nseg; n++ {
 		ja := ia + n*nlen
@@ -528,6 +534,10 @@ func baseline(s []float64, nfa, nfb int) []float64 {
 		}
 	}
 
+	if len(x) == 0 {
+		return
+	}
+
 	nterms := 5
 	// Normalize x to [-1, 1] for numerical stability in polyfit.
 	xscale := 1.0
@@ -542,32 +552,20 @@ func baseline(s []float64, nfa, nfb int) []float64 {
 			xscale = maxX
 		}
 	}
-	xNorm := make([]float64, len(x))
+	xNorm := xNormBuf[:]
+	if len(x) > len(xNormBuf) {
+		xNorm = make([]float64, len(x))
+	}
+	xNorm = xNorm[:len(x)]
 	for i, v := range x {
 		xNorm[i] = v / xscale
 	}
-	minY, maxY, avgY := 1e9, -1e9, 0.0
-	for _, v := range y {
-		if v < minY {
-			minY = v
-		}
-		if v > maxY {
-			maxY = v
-		}
-		avgY += v
-	}
-	avgY /= float64(len(y))
-	aNorm := polyfit(xNorm, y, nterms)
+	aNorm := polyfit5(xNorm, y, nterms)
 
-	sbase := make([]float64, len(s))
-	for i := range sbase {
-		sbase[i] = 0
-	}
 	for i := ia; i <= ib; i++ {
 		t := float64(i-i0) / xscale
 		sbase[i] = aNorm[0] + t*(aNorm[1]+t*(aNorm[2]+t*(aNorm[3]+t*aNorm[4]))) + 0.65
 	}
-	return sbase
 }
 
 // percentile returns the p-th percentile of data (0 <= p <= 100).
@@ -589,24 +587,24 @@ func percentileInPlace(sorted []float64, p float64) float64 {
 	return sorted[idx]
 }
 
-// polyfit performs a least-squares polynomial fit of degree (nterms-1).
-// Returns coefficients a[0..nterms-1] for y = a0 + a1*x + a2*x^2 + ...
-func polyfit(x, y []float64, nterms int) []float64 {
+// polyfit5 performs a least-squares polynomial fit of degree (nterms-1),
+// capped at five terms because baseline() only fits a fourth-order curve.
+func polyfit5(x, y []float64, nterms int) [5]float64 {
 	n := len(x)
 	if n < nterms {
 		nterms = n
 	}
-	a := make([]float64, nterms)
+	if nterms > 5 {
+		nterms = 5
+	}
+	var a [5]float64
 	if nterms == 0 {
 		return a
 	}
 
 	// Build normal equations: (V^T V) a = V^T y
-	ata := make([][]float64, nterms)
-	for i := range ata {
-		ata[i] = make([]float64, nterms)
-	}
-	aty := make([]float64, nterms)
+	var ata [5][5]float64
+	var aty [5]float64
 
 	for i := 0; i < n; i++ {
 		xi := 1.0
@@ -622,10 +620,9 @@ func polyfit(x, y []float64, nterms int) []float64 {
 	}
 
 	// Gaussian elimination with partial pivoting on augmented matrix [ata | aty]
-	aug := make([][]float64, nterms)
-	for i := range aug {
-		aug[i] = make([]float64, nterms+1)
-		copy(aug[i], ata[i])
+	var aug [5][6]float64
+	for i := 0; i < nterms; i++ {
+		copy(aug[i][:], ata[i][:])
 		aug[i][nterms] = aty[i]
 	}
 

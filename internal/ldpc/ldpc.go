@@ -19,10 +19,10 @@ import (
 // ────────────────────────────────────────────────────────────────────────────
 
 const (
-	tanhLUTSize   = 512
-	tanhLUTXMax   = 8.0
-	tanhLUTScale  = float64(tanhLUTSize) / (2.0 * tanhLUTXMax) // maps [-XMax,+XMax] → [0,Size]
-	tanhLUTXMin   = -tanhLUTXMax
+	tanhLUTSize  = 512
+	tanhLUTXMax  = 8.0
+	tanhLUTScale = float64(tanhLUTSize) / (2.0 * tanhLUTXMax) // maps [-XMax,+XMax] → [0,Size]
+	tanhLUTXMin  = -tanhLUTXMax
 )
 
 var tanhLUT [tanhLUTSize + 1]float64
@@ -57,15 +57,15 @@ func fastTanh(x float64) float64 {
 // ────────────────────────────────────────────────────────────────────────────
 
 var (
-	bpOnce    sync.Once
+	bpOnce sync.Once
 	// tovIdx[bit][kk] = index i in LDPCNm row of the check node such that
 	// LDPCMn[bit][kk]-1 == check for that row entry.  Eliminates the
 	// inner "for kk { if LDPCMn[bit][kk]-1 == j }" scan.
-	tovIdx    [ft8params.LDPCn][ft8params.LDPCncw]int
+	tovIdx [ft8params.LDPCn][ft8params.LDPCncw]int
 	// prodSkip[bit][kk] = row index i in LDPCNm[check] to SKIP (the entry
 	// that refers back to variable node `bit`).  All other entries are
 	// multiplied.  Eliminates the "if LDPCNm[chk][i]-1 != bit" branch.
-	prodSkip  [ft8params.LDPCn][ft8params.LDPCncw]int
+	prodSkip [ft8params.LDPCn][ft8params.LDPCncw]int
 )
 
 func initBPTables() {
@@ -484,11 +484,12 @@ func osdDecode(llr [ft8params.LDPCn]float64, keff int, apmask [ft8params.LDPCn]i
 	for i := range absrx {
 		absrx[i] = float64(float32(math.Abs(rx[i])))
 	}
-	indx := argsortAsc(absrx) // indx[0]=least reliable
+	var indxBuf [n]int
+	indx := argsortAscInto(indxBuf[:], absrx) // indx[0]=least reliable
 
 	// osd174_91.f90 lines 79–82: reorder generator matrix by decreasing reliability.
 	var genmrb [ft8params.LDPCk][n]int8
-	indices := make([]int, n)
+	var indices [n]int
 	for i := 0; i < n; i++ {
 		ridx := indx[n-1-i] // Fortran: indx(N+1-i)
 		for row := 0; row < k; row++ {
@@ -712,7 +713,8 @@ func osdDecode(llr [ft8params.LDPCn]float64, keff int, apmask [ft8params.LDPCn]i
 	// osd174_91.f90 lines 230–279: npre2 hash-based pair-flip search.
 	if npre2 == 1 {
 		// Build hash table (osd174_91.f90 lines 231–239).
-		hashFP := make(map[int][]osdPairEntry)
+		hashFP := getOSDPairHash(ntau)
+		defer releaseOSDPairHash(hashFP)
 		for i1 := k - 1; i1 >= 0; i1-- {
 			for i2 := i1 - 1; i2 >= 0; i2-- {
 				ipat := 0
@@ -722,7 +724,7 @@ func osdDecode(llr [ft8params.LDPCn]float64, keff int, apmask [ft8params.LDPCn]i
 						ipat |= 1 << uint(ntau-1-t)
 					}
 				}
-				hashFP[ipat] = append(hashFP[ipat], osdPairEntry{i1: i1, i2: i2})
+				hashFP.add(ipat, i1, i2)
 			}
 		}
 
@@ -767,8 +769,8 @@ func osdDecode(llr [ft8params.LDPCn]float64, keff int, apmask [ft8params.LDPCn]i
 					}
 				}
 
-				entries := hashFP[ipat]
-				for _, ent := range entries {
+				for pos := hashFP.head(ipat); pos != 0; pos = hashFP.next[pos-1] {
+					ent := hashFP.entries[pos-1]
 					in1, in2 := ent.i1, ent.i2
 
 					// mi = misub2 OR {in1, in2}; incremental wt.
@@ -840,7 +842,7 @@ func osdDecode(llr [ft8params.LDPCn]float64, keff int, apmask [ft8params.LDPCn]i
 
 // osdFinish re-orders the codeword, checks CRC, and returns the result.
 // Port of osd174_91.f90 lines 281–292.
-func osdFinish(bestCW [ft8params.LDPCn]int8, indices []int, nhardMin int) ([ft8params.LDPCk]int8, [ft8params.LDPCn]int8, int, bool) {
+func osdFinish(bestCW [ft8params.LDPCn]int8, indices [ft8params.LDPCn]int, nhardMin int) ([ft8params.LDPCk]int8, [ft8params.LDPCn]int8, int, bool) {
 	const (
 		n = ft8params.LDPCn
 		k = ft8params.LDPCk
@@ -894,6 +896,79 @@ func osdFullGenerator(keff int) *[ft8params.LDPCk][ft8params.LDPCn]int8 {
 
 type osdPairEntry struct {
 	i1, i2 int
+}
+
+const osdMaxPairEntries = ft8params.LDPCk * (ft8params.LDPCk - 1) / 2
+const osdPairHashSlots = 8192
+
+type osdPairHash struct {
+	keys      [osdPairHashSlots]int
+	heads     [osdPairHashSlots]int
+	tails     [osdPairHashSlots]int
+	usedSlots []int
+	next      [osdMaxPairEntries]int
+	entries   [osdMaxPairEntries]osdPairEntry
+	count     int
+}
+
+var osdPairHashPool = sync.Pool{
+	New: func() any {
+		return &osdPairHash{
+			usedSlots: make([]int, 0, osdMaxPairEntries),
+		}
+	},
+}
+
+func getOSDPairHash(ntau int) *osdPairHash {
+	h := osdPairHashPool.Get().(*osdPairHash)
+	h.usedSlots = h.usedSlots[:0]
+	h.count = 0
+	return h
+}
+
+func releaseOSDPairHash(h *osdPairHash) {
+	for _, slot := range h.usedSlots {
+		h.keys[slot] = 0
+		h.heads[slot] = 0
+		h.tails[slot] = 0
+	}
+	h.usedSlots = h.usedSlots[:0]
+	h.count = 0
+	osdPairHashPool.Put(h)
+}
+
+func (h *osdPairHash) add(key, i1, i2 int) {
+	idx := h.count
+	h.count++
+	h.entries[idx] = osdPairEntry{i1: i1, i2: i2}
+	h.next[idx] = 0
+
+	slot := h.slot(key)
+	pos := idx + 1
+	if h.heads[slot] == 0 {
+		h.keys[slot] = key
+		h.heads[slot] = pos
+		h.usedSlots = append(h.usedSlots, slot)
+	} else {
+		h.next[h.tails[slot]-1] = pos
+	}
+	h.tails[slot] = pos
+}
+
+func (h *osdPairHash) head(key int) int {
+	slot := h.slot(key)
+	if h.heads[slot] == 0 {
+		return 0
+	}
+	return h.heads[slot]
+}
+
+func (h *osdPairHash) slot(key int) int {
+	slot := (key * 2654435761) & (osdPairHashSlots - 1)
+	for h.heads[slot] != 0 && h.keys[slot] != key {
+		slot = (slot + 1) & (osdPairHashSlots - 1)
+	}
+	return slot
 }
 
 // mrbEncode91 encodes a k-bit message using the generator matrix genmrb.
@@ -961,12 +1036,17 @@ func nextpat91(mi []int8, k, iorder int) int {
 // order of this sort — the algorithm must match the Fortran implementation
 // to produce identical decode results for marginal signals.
 func argsortAsc(arr []float64) []int {
+	indx := make([]int, len(arr))
+	return argsortAscInto(indx, arr)
+}
+
+func argsortAscInto(indx []int, arr []float64) []int {
 	const (
 		m      = 7
 		nstack = 50
 	)
 	n := len(arr)
-	indx := make([]int, n)
+	indx = indx[:n]
 	for i := range indx {
 		indx[i] = i
 	}
