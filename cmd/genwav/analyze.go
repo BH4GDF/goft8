@@ -13,7 +13,8 @@ import (
 func main() {
 	data, err := os.ReadFile("ft8_multi.wav")
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "read failed: %v\n", err)
+		os.Exit(1)
 	}
 	samples := make([]float64, (len(data)-44)/2)
 	for i := range samples {

@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"os"
 
 	"github.com/bh4gdf/goft8"
 	"github.com/bh4gdf/goft8/internal/encode"
@@ -19,7 +20,8 @@ func main() {
 	} {
 		bits, _, _, ok := protocol.Pack77(msg.Message)
 		if !ok {
-			panic("pack failed")
+			fmt.Fprintf(os.Stderr, "pack failed for %q\n", msg.Message)
+			os.Exit(1)
 		}
 		itone := encode.GenFT8Tones(bits)
 		wave := encode.GenFT8Wave(itone, msg.Freq)

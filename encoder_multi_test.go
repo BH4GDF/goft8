@@ -60,3 +60,18 @@ func TestEncoderMultiEmpty(t *testing.T) {
 		t.Fatal("expected error for empty message list")
 	}
 }
+
+func TestEncoderMulti48kLength(t *testing.T) {
+	enc := NewEncoder(WithSampleRate(48000))
+	msgs := []MessageFreq{
+		{Message: "CQ BH4GDF PM00", Freq: 1200},
+		{Message: "BH4GDF BH4HKZ -10", Freq: 1800},
+	}
+	waveform, err := enc.EncodeMulti(msgs)
+	if err != nil {
+		t.Fatalf("EncodeMulti failed: %v", err)
+	}
+	if want := NTXSamples * 4; len(waveform) != want {
+		t.Fatalf("waveform length %d, want %d", len(waveform), want)
+	}
+}

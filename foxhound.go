@@ -33,10 +33,11 @@ type FoxHoundParams struct {
 	NSlots int     // number of slots (Fox only)
 }
 
-// DecodeFoxHound attempts to decode Fox/Hound signals.
+// DecodeFoxHound is a reserved API for future Fox/Hound decoding support.
 //
 // TODO: full implementation pending port of DecoderSFox from MSHV.
-// Currently returns nil unconditionally.
+// It is not implemented yet and currently returns nil unconditionally; callers
+// must not treat nil as proof that a Fox/Hound signal was absent.
 func DecodeFoxHound(audio []float32, params FoxHoundParams) []DecodeCandidate {
 	_ = audio
 	_ = params

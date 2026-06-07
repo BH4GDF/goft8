@@ -148,6 +148,36 @@ func TestReadWAVRejectsMalformedInputs(t *testing.T) {
 		_, _, err := ReadWAVMono(path)
 		assertErrorContains(t, err, "unsupported WAV format=1 bits=8")
 	})
+
+	t.Run("oversized fmt chunk", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "oversized-fmt.wav")
+		var buf bytes.Buffer
+		buf.WriteString("RIFF")
+		writeLE(t, &buf, uint32(4+8))
+		buf.WriteString("WAVE")
+		buf.WriteString("fmt ")
+		writeLE(t, &buf, uint32(maxWAVFmtChunkSize+1))
+		if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, _, _, err := ReadWAVParams(path)
+		assertErrorContains(t, err, "fmt chunk too large")
+	})
+
+	t.Run("oversized data chunk", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "oversized-data.wav")
+		declaredDataSize := uint32(maxWAVInputSamples+1) * 2
+		writeTestWAVWithDeclaredData(t, path, 1, 1, 12000, 16, declaredDataSize)
+		_, _, err := ReadWAVMono(path)
+		assertErrorContains(t, err, "data chunk too large")
+	})
+
+	t.Run("misaligned data chunk", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "misaligned-data.wav")
+		writeTestWAV(t, path, 1, 1, 12000, 24, []byte{1, 2})
+		_, _, err := ReadWAVMono(path)
+		assertErrorContains(t, err, "not aligned to 3-byte samples")
+	})
 }
 
 func writeTestWAV(t *testing.T, path string, audioFormat, channels uint16, sampleRate uint32, bitDepth uint16, data []byte, beforeFmt ...wavTestChunk) {
@@ -182,6 +212,33 @@ func writeTestWAV(t *testing.T, path string, audioFormat, channels uint16, sampl
 	for _, chunk := range chunks {
 		writeChunk(t, &buf, chunk)
 	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeTestWAVWithDeclaredData(t *testing.T, path string, audioFormat, channels uint16, sampleRate uint32, bitDepth uint16, dataSize uint32) {
+	t.Helper()
+
+	blockAlign := channels * bitDepth / 8
+	byteRate := sampleRate * uint32(blockAlign)
+
+	var fmtBody bytes.Buffer
+	writeLE(t, &fmtBody, audioFormat)
+	writeLE(t, &fmtBody, channels)
+	writeLE(t, &fmtBody, sampleRate)
+	writeLE(t, &fmtBody, byteRate)
+	writeLE(t, &fmtBody, blockAlign)
+	writeLE(t, &fmtBody, bitDepth)
+
+	var buf bytes.Buffer
+	buf.WriteString("RIFF")
+	writeLE(t, &buf, uint32(4+8+fmtBody.Len()+8)+dataSize)
+	buf.WriteString("WAVE")
+	writeChunk(t, &buf, wavTestChunk{id: "fmt ", data: fmtBody.Bytes()})
+	buf.WriteString("data")
+	writeLE(t, &buf, dataSize)
 
 	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		t.Fatal(err)

@@ -17,6 +17,11 @@ type WAVFormat struct {
 	Channels   int
 }
 
+const (
+	maxWAVFmtChunkSize = 1 << 20
+	maxWAVInputSamples = AudioSamplesPerCycle * 4
+)
+
 // WriteWAV writes float32 samples as a standard RIFF WAV file.
 //
 // Parameters:
@@ -173,6 +178,9 @@ func readWAVMono(path string, readData bool, scale wavScaleMode) ([]float32, WAV
 			if chunkSize < 16 {
 				return nil, WAVFormat{}, errors.New("goft8: fmt chunk too short")
 			}
+			if chunkSize > maxWAVFmtChunkSize {
+				return nil, WAVFormat{}, fmt.Errorf("goft8: fmt chunk too large: %d bytes", chunkSize)
+			}
 			body := make([]byte, chunkSize)
 			if _, err := io.ReadFull(f, body); err != nil {
 				return nil, WAVFormat{}, fmt.Errorf("goft8: read fmt chunk: %w", err)
@@ -194,7 +202,11 @@ func readWAVMono(path string, readData bool, scale wavScaleMode) ([]float32, WAV
 			if !fmtFound {
 				return nil, WAVFormat{}, errors.New("goft8: data chunk before fmt chunk")
 			}
-			samples, err := readWAVSamples(f, int(chunkSize), format, scale)
+			dataSize, err := checkedWAVDataSize(chunkSize, format)
+			if err != nil {
+				return nil, WAVFormat{}, err
+			}
+			samples, err := readWAVSamples(f, dataSize, format, scale)
 			if err != nil {
 				return nil, WAVFormat{}, err
 			}
@@ -204,6 +216,36 @@ func readWAVMono(path string, readData bool, scale wavScaleMode) ([]float32, WAV
 				return nil, WAVFormat{}, err
 			}
 		}
+	}
+}
+
+func checkedWAVDataSize(chunkSize uint32, format WAVFormat) (int, error) {
+	bytesPerSample, err := wavBytesPerSample(format)
+	if err != nil {
+		return 0, err
+	}
+	if chunkSize%uint32(bytesPerSample) != 0 {
+		return 0, fmt.Errorf("goft8: data chunk size %d is not aligned to %d-byte samples", chunkSize, bytesPerSample)
+	}
+	samples := int64(chunkSize) / int64(bytesPerSample)
+	if samples > int64(maxWAVInputSamples) {
+		return 0, fmt.Errorf("goft8: data chunk too large: %d samples (max %d)", samples, maxWAVInputSamples)
+	}
+	return int(chunkSize), nil
+}
+
+func wavBytesPerSample(format WAVFormat) (int, error) {
+	switch {
+	case format.PCMFormat == 1 && format.BitDepth == 16:
+		return 2, nil
+	case format.PCMFormat == 1 && format.BitDepth == 24:
+		return 3, nil
+	case format.PCMFormat == 1 && format.BitDepth == 32:
+		return 4, nil
+	case format.PCMFormat == 3 && format.BitDepth == 32:
+		return 4, nil
+	default:
+		return 0, fmt.Errorf("goft8: unsupported WAV format=%d bits=%d (want PCM16/24/32 or float32)", format.PCMFormat, format.BitDepth)
 	}
 }
 

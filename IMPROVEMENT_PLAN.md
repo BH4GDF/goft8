@@ -8,7 +8,7 @@
 - `go test -race ./...` 通过。
 - `go test -cover ./...`：根包覆盖率约 `54.2%`；`internal/encode` 约 `81.2%`，`internal/dsp` 约 `38.7%`，`internal/protocol` 约 `32.4%`，`internal/ldpc` 约 `7.9%`。
 - 代表性 benchmark：`BenchmarkEncoderEncode` 约 `6.65 ms/op, 7.4 MB/op`；`BenchmarkDecodeWAVCap1` 约 `496 ms/op, 46 MB/op`。
-- 当前状态：P0、P1、P2 已完成首轮实现；P3、P4、P5 仍待推进。
+- 当前状态：P0、P1、P2、P3、P4、P5 已完成首轮实现。
 
 ## 主要可改进项
 
@@ -35,26 +35,26 @@
 
 验收标准：新增 GitHub Actions 或等价 CI，执行 `go test ./...`、`go test -race ./...`；为协议 packing、PCM 转换、非法选项、CLI smoke path 增加测试。
 
-### P3：性能与内存优化
+### P3：性能与内存优化（已完成首轮）
 
 - 解码基线约 `46 MB/op`、`3608 allocs/op`，适合优先做分配热点治理。
 - `EncodeMulti` 的缓冲池固定回收 `NTXSamples` 长度，48 kHz 场景会反复分配大缓冲，影响多消息编码性能。
 
-验收标准：保留当前 benchmark；增加 `EncodeMulti` 48 kHz benchmark；首轮目标为解码分配降低 15% 以上，编码多消息分配降低 25% 以上，且解码结果不变。
+验收标准：保留当前 benchmark；增加 `EncodeMulti` 48 kHz benchmark；首轮目标为解码分配降低 15% 以上，编码多消息分配降低 25% 以上，且解码结果不变。（编码多消息首轮已完成；解码分配另行跟进）
 
-### P4：安全与健壮性
+### P4：安全与健壮性（已完成首轮）
 
 - 对 RIFF/WAV chunk size 做上限保护，避免异常文件导致大内存分配。
 - 对消息解析、WAV 解析增加 fuzz 测试。
 - `cmd/genwav/*.go` 的 ignore 工具中存在 `panic`，应改为明确错误输出，避免复制到正式命令时保留坏习惯。
 
-验收标准：新增 fuzz 入口；恶意/畸形输入不 panic、不超大分配；CLI 错误路径返回非零退出码和清晰错误。
+验收标准：新增 fuzz 入口；恶意/畸形输入不 panic、不超大分配；CLI 错误路径返回非零退出码和清晰错误。（首轮已完成）
 
-### P5：功能边界澄清
+### P5：功能边界澄清（已完成首轮）
 
 - `foxhound.go` 的 `DecodeFoxHound` 当前无条件返回 `nil`，调用方难以区分“无解码结果”和“功能未实现”。
 
-验收标准：将 API 调整为返回错误，或在文档中明确未实现状态；增加测试固定当前行为，避免误用。
+验收标准：将 API 调整为返回错误，或在文档中明确未实现状态；增加测试固定当前行为，避免误用。（首轮已完成）
 
 ## 角色分工
 
@@ -99,6 +99,6 @@
 ## 完成定义
 
 - 所有 P0/P1/P2 项完成并合入。
-- P3/P4/P5 至少完成首轮实现或形成明确 issue。
+- P0-P5 均完成首轮实现；解码分配优化作为后续性能专项继续跟进。
 - `go test ./...`、`go test -race ./...`、关键 benchmark 均有记录。
 - 文档、测试、CLI 行为与公开 API 保持一致。

@@ -115,12 +115,40 @@ func (e *Encoder) validatePCMConfig() error {
 	return nil
 }
 
-// encodeBufPool reuses the txSamples-length buffers needed by
-// EncodeMulti.  Each goroutine borrows its own.
-var encodeBufPool = sync.Pool{
-	New: func() interface{} {
-		return make([]float32, NTXSamples)
+// encodeBufPools reuse the txSamples-length accumulation buffers needed by
+// EncodeMulti. Keep one pool per supported sample rate so 48 kHz calls do not
+// repeatedly allocate and then return truncated 12 kHz buffers.
+var encodeBufPools = map[int]*sync.Pool{
+	12000: {
+		New: func() interface{} {
+			return make([]float32, NTXSamples)
+		},
 	},
+	48000: {
+		New: func() interface{} {
+			return make([]float32, NTXSamples*4)
+		},
+	},
+}
+
+func encodeBufGet(sampleRate int) []float32 {
+	pool := encodeBufPools[sampleRate]
+	return pool.Get().([]float32)
+}
+
+func encodeBufPut(sampleRate int, buf []float32) {
+	pool := encodeBufPools[sampleRate]
+	if pool == nil {
+		return
+	}
+	want := NTXSamples
+	if sampleRate == 48000 {
+		want *= 4
+	}
+	if cap(buf) < want {
+		return
+	}
+	pool.Put(buf[:want])
 }
 
 // Encode generates the GFSK-modulated waveform for a single FT8
@@ -161,14 +189,11 @@ func (e *Encoder) EncodeMulti(msgs []MessageFreq) ([]float32, error) {
 	nsamples := e.txSamples()
 
 	// Borrow a zeroed accumulation buffer from the pool.
-	sum := encodeBufPool.Get().([]float32)
+	sum := encodeBufGet(e.cfg.sampleRate)
 	for i := range sum {
 		sum[i] = 0
 	}
-	// Ensure the buffer is large enough for the configured rate.
-	if len(sum) < nsamples {
-		sum = make([]float32, nsamples)
-	}
+	sum = sum[:nsamples]
 
 	// Keep track of accepted frequencies (in list order) for spacing checks.
 	var accepted []float64
@@ -183,7 +208,7 @@ func (e *Encoder) EncodeMulti(msgs []MessageFreq) ([]float32, error) {
 		f0 := clampTxFreq(mf.Freq)
 		for _, prev := range accepted {
 			if math.Abs(f0-prev) < 60.0 {
-				encodeBufPool.Put(sum[:NTXSamples])
+				encodeBufPut(e.cfg.sampleRate, sum)
 				return nil, fmt.Errorf("ft8: message %d frequency %.1f Hz is too close to earlier message at %.1f Hz (min spacing 60 Hz)", i, f0, prev)
 			}
 		}
@@ -191,7 +216,7 @@ func (e *Encoder) EncodeMulti(msgs []MessageFreq) ([]float32, error) {
 
 		bits, _, _, ok := protocol.Pack77(mf.Message)
 		if !ok {
-			encodeBufPool.Put(sum[:NTXSamples])
+			encodeBufPut(e.cfg.sampleRate, sum)
 			return nil, fmt.Errorf("ft8: cannot pack message %q", mf.Message)
 		}
 		jobs = append(jobs, waveJob{f0: f0, bits: bits})
@@ -255,7 +280,7 @@ func (e *Encoder) EncodeMulti(msgs []MessageFreq) ([]float32, error) {
 		waveform[i] = v / scale
 	}
 
-	encodeBufPool.Put(sum[:NTXSamples])
+	encodeBufPut(e.cfg.sampleRate, sum)
 	return waveform, nil
 }
 
