@@ -74,6 +74,28 @@ func TestReadWAVMonoSupportsFloat32(t *testing.T) {
 	assertFloat32SliceClose(t, got, want, 0)
 }
 
+func TestWriteWAVRejectsUnsupportedBitDepth(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.wav")
+
+	err := WriteWAV(path, []float32{0, 0.5}, 12000, 20)
+
+	assertErrorContains(t, err, "unsupported bit depth 20")
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("unexpected output file exists or stat failed: %v", statErr)
+	}
+}
+
+func TestWriteWAVRejectsUnsupportedSampleRate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.wav")
+
+	err := WriteWAV(path, []float32{0, 0.5}, 0, 16)
+
+	assertErrorContains(t, err, "unsupported sample rate 0")
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("unexpected output file exists or stat failed: %v", statErr)
+	}
+}
+
 func TestReadWAVMono12kDownsamples48k(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "48k.wav")
 	writeTestWAV(t, path, 1, 1, 48000, 16, pcm16TestData(4, 8, 12, 16, 20, 24, 28, 32))

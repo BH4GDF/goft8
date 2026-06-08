@@ -30,6 +30,10 @@ const (
 //   - sampleRate: sample rate in Hz (e.g. 12000 or 48000)
 //   - bitDepth: PCM bit depth (16, 24, or 32)
 func WriteWAV(name string, samples []float32, sampleRate int, bitDepth int) error {
+	if sampleRate <= 0 {
+		return fmt.Errorf("goft8: unsupported sample rate %d (want > 0)", sampleRate)
+	}
+
 	var data []byte
 	var audioFormat uint16
 
@@ -40,10 +44,11 @@ func WriteWAV(name string, samples []float32, sampleRate int, bitDepth int) erro
 	case 32:
 		data = FloatToPCM(samples, 32)
 		audioFormat = 1 // PCM
-	default:
+	case 16:
 		data = FloatToPCM(samples, 16)
 		audioFormat = 1 // PCM
-		bitDepth = 16
+	default:
+		return fmt.Errorf("goft8: unsupported bit depth %d (want 16, 24, or 32)", bitDepth)
 	}
 
 	numChannels := 1
@@ -51,6 +56,9 @@ func WriteWAV(name string, samples []float32, sampleRate int, bitDepth int) erro
 	byteRate := sampleRate * numChannels * bitsPerSample / 8
 	blockAlign := numChannels * bitsPerSample / 8
 	dataSize := len(data)
+	if dataSize > math.MaxUint32-36 {
+		return fmt.Errorf("goft8: WAV data too large: %d bytes", dataSize)
+	}
 
 	f, err := os.Create(name)
 	if err != nil {

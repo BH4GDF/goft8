@@ -16,6 +16,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "read failed: %v\n", err)
 		os.Exit(1)
 	}
+	if len(data) < 44 {
+		fmt.Fprintf(os.Stderr, "file too short\n")
+		os.Exit(1)
+	}
+	if (len(data)-44)%2 != 0 {
+		fmt.Fprintf(os.Stderr, "PCM16 data is not sample-aligned\n")
+		os.Exit(1)
+	}
 	// Skip 44-byte WAV header.
 	samples := make([]float64, (len(data)-44)/2)
 	for i := range samples {

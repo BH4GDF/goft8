@@ -22,6 +22,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "file too short\n")
 		os.Exit(1)
 	}
+	if (len(data)-44)%2 != 0 {
+		fmt.Fprintf(os.Stderr, "PCM16 data is not sample-aligned\n")
+		os.Exit(1)
+	}
 
 	// Extract raw int16 samples and convert to float32.
 	rawSamples := make([]float32, (len(data)-44)/2)

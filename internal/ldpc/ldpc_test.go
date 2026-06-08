@@ -101,6 +101,36 @@ func TestOSDDecodeOrder3CleanCodeword(t *testing.T) {
 	}
 }
 
+func TestArgsortAscIntoSortsLargeInput(t *testing.T) {
+	arr := make([]float64, 2048)
+	for i := range arr {
+		arr[i] = math.Sin(float64(i)*17.0) + math.Cos(float64(i)*3.0)
+	}
+	indx := make([]int, len(arr))
+
+	got := argsortAscInto(indx, arr)
+
+	if len(got) != len(arr) {
+		t.Fatalf("len = %d, want %d", len(got), len(arr))
+	}
+	if len(got) > 0 && &got[0] != &indx[0] {
+		t.Fatal("argsortAscInto did not reuse provided index buffer")
+	}
+	seen := make([]bool, len(arr))
+	for i, idx := range got {
+		if idx < 0 || idx >= len(arr) {
+			t.Fatalf("index[%d] = %d out of range", i, idx)
+		}
+		if seen[idx] {
+			t.Fatalf("index[%d] = %d appears more than once", i, idx)
+		}
+		seen[idx] = true
+		if i > 0 && arr[got[i-1]] > arr[idx] {
+			t.Fatalf("order violation at %d: %g > %g", i, arr[got[i-1]], arr[idx])
+		}
+	}
+}
+
 type ldpcTestVector struct {
 	message91 [ft8params.LDPCk]int8
 	codeword  [ft8params.LDPCn]int8

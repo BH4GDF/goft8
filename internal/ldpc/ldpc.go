@@ -1042,8 +1042,8 @@ func argsortAsc(arr []float64) []int {
 
 func argsortAscInto(indx []int, arr []float64) []int {
 	const (
-		m      = 7
-		nstack = 50
+		m                = 7
+		initialStackSize = 50
 	)
 	n := len(arr)
 	indx = indx[:n]
@@ -1054,7 +1054,7 @@ func argsortAscInto(indx []int, arr []float64) []int {
 	jstack := 0
 	l := 0
 	ir := n - 1
-	istack := make([]int, nstack)
+	istack := make([]int, initialStackSize)
 
 	for {
 		if ir-l < m {
@@ -1113,8 +1113,10 @@ func argsortAscInto(indx []int, arr []float64) []int {
 			indx[l] = indx[j]
 			indx[j] = indxt
 			jstack += 2
-			if jstack > nstack {
-				panic("indexx: NSTACK too small")
+			if jstack > len(istack) {
+				next := make([]int, len(istack)*2)
+				copy(next, istack)
+				istack = next
 			}
 			if ir-i+1 >= j-l {
 				istack[jstack-1] = ir
