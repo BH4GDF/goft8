@@ -50,19 +50,47 @@ func ComputeSymbolSpectra(cd0 []complex128, ibest int) ([8][ft8params.NN]complex
 		}
 
 		// call four2a(csymb,32,1,-1,1)   — 32-point c2c forward FFT
-		cx := make([]complex128, 32)
-		copy(cx, csymb[:])
-		fft32(cx) // in-place radix-2 forward FFT, unnormalized
+		// Operate in-place on the stack-allocated array (no heap allocation).
+		fft32Array(&csymb)
 
 		// cs(0:7,k) = csymb(1:8) / 1e3
 		// s8(0:7,k) = abs(csymb(1:8))
 		//
-		// Fortran csymb(1:8) is 1-indexed → Go cx[0:8] is 0-indexed.
+		// Fortran csymb(1:8) is 1-indexed → Go csymb[0:8] is 0-indexed.
 		// abs() on a complex number = sqrt(re² + im²).
 		for t := 0; t < 8; t++ {
-			cs[t][k-1] = cx[t] * complex(1e-3, 0) // /1e3
-			r, im := real(cx[t]), imag(cx[t])
+			cs[t][k-1] = csymb[t] * complex(1e-3, 0) // /1e3
+			r, im := real(csymb[t]), imag(csymb[t])
 			s8[t][k-1] = math.Sqrt(r*r + im*im) // abs(complex)
+		}
+	}
+
+	return cs, s8
+}
+
+// ComputeSymbolSpectraPower is like ComputeSymbolSpectra but returns squared
+// magnitudes (power) instead of magnitudes. This avoids the expensive sqrt
+// when the caller only needs power values for argmax comparisons.
+func ComputeSymbolSpectraPower(cd0 []complex128, ibest int) ([8][ft8params.NN]complex128, [8][ft8params.NN]float64) {
+	var cs [8][ft8params.NN]complex128
+	var s8 [8][ft8params.NN]float64
+
+	for k := 1; k <= ft8params.NN; k++ {
+		i1 := ibest + (k-1)*32
+
+		var csymb [32]complex128
+		if i1 >= 0 && i1+31 <= ft8params.NP2-1 {
+			for j := 0; j < 32; j++ {
+				csymb[j] = cd0[i1+j]
+			}
+		}
+
+		fft32Array(&csymb)
+
+		for t := 0; t < 8; t++ {
+			cs[t][k-1] = csymb[t] * complex(1e-3, 0)
+			r, im := real(csymb[t]), imag(csymb[t])
+			s8[t][k-1] = r*r + im*im // power, not magnitude
 		}
 	}
 
@@ -105,6 +133,40 @@ func fft32(x []complex128) {
 	}
 }
 
+// fft32Array is an optimized 32-point FFT operating on a fixed-size array.
+// This avoids heap allocation from the slice-based fft32 wrapper.
+func fft32Array(x *[32]complex128) {
+	const n = 32
+	// Bit-reversal permutation.
+	j := 0
+	for i := 0; i < n-1; i++ {
+		if i < j {
+			x[i], x[j] = x[j], x[i]
+		}
+		m := n >> 1
+		for m >= 1 && j >= m {
+			j -= m
+			m >>= 1
+		}
+		j += m
+	}
+	// Cooley-Tukey butterfly stages (5 stages for n=32).
+	for stage := 1; stage < n; stage <<= 1 {
+		theta := -math.Pi / float64(stage)
+		wm := complex(math.Cos(theta), math.Sin(theta))
+		for k := 0; k < n; k += stage << 1 {
+			w := complex(1, 0)
+			for jj := 0; jj < stage; jj++ {
+				t := w * x[k+jj+stage]
+				u := x[k+jj]
+				x[k+jj] = u + t
+				x[k+jj+stage] = u - t
+				w *= wm
+			}
+		}
+	}
+}
+
 // ComputeSoftMetrics computes the five sets of soft-decision metrics
 // (bmeta, bmetb, bmetc, bmetd, bmete) for the 174 LDPC LLR values from the
 // complex symbol spectra.
@@ -130,20 +192,12 @@ func fft32(x []complex128) {
 //	call normalizebmet(bmetd,174)
 //	call normalizebmet(bmete,174)  // MSHV enhancement
 func ComputeSoftMetrics(cs *[8][ft8params.NN]complex128) (bmeta, bmetb, bmetc, bmetd, bmete [174]float64) {
-
-	// Fortran: logical one(0:511,0:8)
-	//   one(i,j) = iand(i, 2**j) .ne. 0
-	one := func(i, j int) bool {
-		return (i>>uint(j))&1 != 0
-	}
-
 	// Fortran: data graymap/0,1,3,2,5,6,4,7/
 	graymap := ft8params.GrayMap
 
 	for nsym := 1; nsym <= 3; nsym++ {
-		nt := 1 << (3 * nsym) // 8, 64, 512
-
-		s2 := make([]float64, nt)
+		// Fortran: ibmax = 2,5,8 for nsym = 1,2,3
+		ibmax := 3*nsym - 1
 
 		for ihalf := 1; ihalf <= 2; ihalf++ {
 			for k := 1; k <= 29; k += nsym {
@@ -157,28 +211,67 @@ func ComputeSoftMetrics(cs *[8][ft8params.NN]complex128) (bmeta, bmetb, bmetc, b
 					ks = k + 43
 				}
 
-				// Fortran lines 189–202: compute s2(0:nt-1)
-				for i := 0; i < nt; i++ {
-					i1 := i / 64
-					i2 := (i & 63) / 8
-					i3 := i & 7
+				var sym0, sym1, sym2 [8]complex128
+				for i := 0; i < 8; i++ {
+					tone := graymap[i]
+					sym0[i] = cs[tone][ks-1]
+					if nsym >= 2 {
+						sym1[i] = cs[tone][ks]
+					}
+					if nsym == 3 {
+						sym2[i] = cs[tone][ks+1]
+					}
+				}
 
-					switch nsym {
-					case 1:
-						// s2(i) = abs(cs(graymap(i3), ks))
-						z := cs[graymap[i3]][ks-1] // ks-1: Fortran→Go index
+				var maxHigh, maxMid, maxLow [8]float64
+
+				// Fortran lines 189–202 compute candidate magnitudes s2, then
+				// lines 207–209 scan maxima for each bit. Because sqrt is
+				// monotonic, aggregate maxima in the power domain by the
+				// 3-bit symbol fields and only take sqrt for final per-bit
+				// maxima.
+				switch nsym {
+				case 1:
+					for i := 0; i < 8; i++ {
+						z := sym0[i]
 						r, im := real(z), imag(z)
-						s2[i] = math.Sqrt(r*r + im*im)
-					case 2:
-						// s2(i) = abs(cs(graymap(i2),ks) + cs(graymap(i3),ks+1))
-						z := cs[graymap[i2]][ks-1] + cs[graymap[i3]][ks]
-						r, im := real(z), imag(z)
-						s2[i] = math.Sqrt(r*r + im*im)
-					case 3:
-						// s2(i) = abs(cs(graymap(i1),ks) + cs(graymap(i2),ks+1) + cs(graymap(i3),ks+2))
-						z := cs[graymap[i1]][ks-1] + cs[graymap[i2]][ks] + cs[graymap[i3]][ks+1]
-						r, im := real(z), imag(z)
-						s2[i] = math.Sqrt(r*r + im*im)
+						maxLow[i] = r*r + im*im
+					}
+				case 2:
+					for i2 := 0; i2 < 8; i2++ {
+						z2 := sym0[i2]
+						for i3 := 0; i3 < 8; i3++ {
+							z := z2 + sym1[i3]
+							r, im := real(z), imag(z)
+							power := r*r + im*im
+							if power > maxMid[i2] {
+								maxMid[i2] = power
+							}
+							if power > maxLow[i3] {
+								maxLow[i3] = power
+							}
+						}
+					}
+				case 3:
+					for i1 := 0; i1 < 8; i1++ {
+						z1 := sym0[i1]
+						for i2 := 0; i2 < 8; i2++ {
+							z12 := z1 + sym1[i2]
+							for i3 := 0; i3 < 8; i3++ {
+								z := z12 + sym2[i3]
+								r, im := real(z), imag(z)
+								power := r*r + im*im
+								if power > maxHigh[i1] {
+									maxHigh[i1] = power
+								}
+								if power > maxMid[i2] {
+									maxMid[i2] = power
+								}
+								if power > maxLow[i3] {
+									maxLow[i3] = power
+								}
+							}
+						}
 					}
 				}
 
@@ -186,36 +279,20 @@ func ComputeSoftMetrics(cs *[8][ft8params.NN]complex128) (bmeta, bmetb, bmetc, b
 				// This is 1-based in Fortran. For Go 0-based: i32 = (k-1)*3 + (ihalf-1)*87
 				i32 := (k-1)*3 + (ihalf-1)*87
 
-				// Fortran: ibmax = 2,5,8 for nsym = 1,2,3
-				var ibmax int
-				switch nsym {
-				case 1:
-					ibmax = 2
-				case 2:
-					ibmax = 5
-				case 3:
-					ibmax = 8
-				}
-
 				for ib := 0; ib <= ibmax; ib++ {
 					bitPos := ibmax - ib
 
 					// bm = maxval(s2(0:nt-1), one(0:nt-1, ibmax-ib))
 					//    - maxval(s2(0:nt-1), .not.one(0:nt-1, ibmax-ib))
-					max1 := -1e30
-					max0 := -1e30
-					for idx := 0; idx < nt; idx++ {
-						if one(idx, bitPos) {
-							if s2[idx] > max1 {
-								max1 = s2[idx]
-							}
-						} else {
-							if s2[idx] > max0 {
-								max0 = s2[idx]
-							}
-						}
+					var bm, den float64
+					switch {
+					case bitPos >= 6:
+						bm, den = softMetricFromGroups(&maxHigh, uint(bitPos-6))
+					case bitPos >= 3:
+						bm, den = softMetricFromGroups(&maxMid, uint(bitPos-3))
+					default:
+						bm, den = softMetricFromGroups(&maxLow, uint(bitPos))
 					}
-					bm := max1 - max0
 
 					// Fortran: if(i32+ib .gt. 174) cycle
 					// Fortran i32 is 1-based, so i32+ib > 174.
@@ -229,10 +306,6 @@ func ComputeSoftMetrics(cs *[8][ft8params.NN]complex128) (bmeta, bmetb, bmetc, b
 					case 1:
 						bmeta[idx] = bm
 						// den = max(maxval with one, maxval without one)
-						den := max1
-						if max0 > den {
-							den = max0
-						}
 						if den > 0.0 {
 							bmetd[idx] = bm / den
 						} else {
@@ -250,16 +323,16 @@ func ComputeSoftMetrics(cs *[8][ft8params.NN]complex128) (bmeta, bmetb, bmetc, b
 
 	// MSHV ws300rc1: bmete[i] = best of bmeta/bmetb/bmetc at each position.
 	for i := 0; i < 174; i++ {
-		temp := []float64{bmeta[i], bmetb[i], bmetc[i]}
-		best := 0
-		maxAbs := math.Abs(temp[0])
-		for j := 1; j < 3; j++ {
-			if v := math.Abs(temp[j]); v > maxAbs {
-				best = j
-				maxAbs = v
-			}
+		best := bmeta[i]
+		maxAbs := math.Abs(best)
+		if v := math.Abs(bmetb[i]); v > maxAbs {
+			best = bmetb[i]
+			maxAbs = v
 		}
-		bmete[i] = temp[best]
+		if v := math.Abs(bmetc[i]); v > maxAbs {
+			best = bmetc[i]
+		}
+		bmete[i] = best
 	}
 
 	// Fortran lines 230–233: normalize all five metric arrays.
@@ -270,6 +343,43 @@ func ComputeSoftMetrics(cs *[8][ft8params.NN]complex128) (bmeta, bmetb, bmetc, b
 	normalizeBmet(bmete[:])
 
 	return
+}
+
+func softMetricFromGroups(groups *[8]float64, bit uint) (bm, den float64) {
+	var max1, max0 float64
+	switch bit {
+	case 0:
+		max1 = max4(groups[1], groups[3], groups[5], groups[7])
+		max0 = max4(groups[0], groups[2], groups[4], groups[6])
+	case 1:
+		max1 = max4(groups[2], groups[3], groups[6], groups[7])
+		max0 = max4(groups[0], groups[1], groups[4], groups[5])
+	default:
+		max1 = max4(groups[4], groups[5], groups[6], groups[7])
+		max0 = max4(groups[0], groups[1], groups[2], groups[3])
+	}
+
+	max1Mag := math.Sqrt(max1)
+	max0Mag := math.Sqrt(max0)
+	bm = max1Mag - max0Mag
+	den = max1Mag
+	if max0Mag > den {
+		den = max0Mag
+	}
+	return bm, den
+}
+
+func max4(a, b, c, d float64) float64 {
+	if b > a {
+		a = b
+	}
+	if c > a {
+		a = c
+	}
+	if d > a {
+		a = d
+	}
+	return a
 }
 
 // normalizeBmet normalizes a metric array to unit variance.

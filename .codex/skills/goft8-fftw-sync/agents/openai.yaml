@@ -1,0 +1,13 @@
+interface:
+  display_name: "GoFT8 FFTW Sync"
+  short_description: "Plan safe main-to-fftw syncs"
+  default_prompt: "Use $goft8-fftw-sync to evaluate and plan a goft8 main-to-fftw branch synchronization."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "goft8-filesystem"
+      description: "Repository-scoped filesystem access for goft8"
+    - type: "mcp"
+      value: "goft8-git"
+      description: "Repository-scoped Git history and diff access for goft8"

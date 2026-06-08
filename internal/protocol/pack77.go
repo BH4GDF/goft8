@@ -27,7 +27,9 @@ var csecArr = [86]string{
 }
 
 // writeBits writes a value into a bit string at the given position.
-func writeBits(bits *[77]int8, pos, nbits, value int) {
+// value is int64 so that 58-bit non-standard callsign values (up to 38^11)
+// are handled correctly on all platforms including 32-bit.
+func writeBits(bits *[77]int8, pos, nbits int, value int64) {
 	for i := nbits - 1; i >= 0; i-- {
 		bits[pos+i] = int8(value & 1)
 		value >>= 1
@@ -143,9 +145,9 @@ func packTelemetry(msg string) ([77]int8, bool) {
 	}
 
 	var bits [77]int8
-	writeBits(&bits, 0, 23, int(ntel[0]))
-	writeBits(&bits, 23, 24, int(ntel[1]))
-	writeBits(&bits, 47, 24, int(ntel[2]))
+	writeBits(&bits, 0, 23, ntel[0])
+	writeBits(&bits, 23, 24, ntel[1])
+	writeBits(&bits, 47, 24, ntel[2])
 	writeBits(&bits, 71, 3, 5)
 	writeBits(&bits, 74, 3, 0)
 
@@ -210,10 +212,10 @@ func packDXpedition(msg string) ([77]int8, bool) {
 	SaveHashCall(call3)
 
 	var bits [77]int8
-	writeBits(&bits, 0, 28, n28a)
-	writeBits(&bits, 28, 28, n28b)
-	writeBits(&bits, 56, 10, n10)
-	writeBits(&bits, 66, 5, n5)
+	writeBits(&bits, 0, 28, int64(n28a))
+	writeBits(&bits, 28, 28, int64(n28b))
+	writeBits(&bits, 56, 10, int64(n10))
+	writeBits(&bits, 66, 5, int64(n5))
 	writeBits(&bits, 71, 3, 1)
 	writeBits(&bits, 74, 3, 0)
 
@@ -283,13 +285,13 @@ func packFieldDay(msg string) ([77]int8, int, bool) {
 	n28b := Pack28(call2)
 
 	var bits [77]int8
-	writeBits(&bits, 0, 28, n28a)
-	writeBits(&bits, 28, 28, n28b)
-	writeBits(&bits, 56, 1, ir)
-	writeBits(&bits, 57, 4, intx)
-	writeBits(&bits, 61, 3, nclass)
-	writeBits(&bits, 64, 7, isec)
-	writeBits(&bits, 71, 3, n3)
+	writeBits(&bits, 0, 28, int64(n28a))
+	writeBits(&bits, 28, 28, int64(n28b))
+	writeBits(&bits, 56, 1, int64(ir))
+	writeBits(&bits, 57, 4, int64(intx))
+	writeBits(&bits, 61, 3, int64(nclass))
+	writeBits(&bits, 64, 7, int64(isec))
+	writeBits(&bits, 71, 3, int64(n3))
 	writeBits(&bits, 74, 3, 0)
 
 	return bits, n3, true
@@ -349,10 +351,10 @@ func packStandardMessage(msg string) ([77]int8, int, bool) {
 	}
 
 	var bits [77]int8
-	writeBits(&bits, 0, 28, n28a)
-	writeBits(&bits, 28, 1, ipa)
-	writeBits(&bits, 29, 28, n28b)
-	writeBits(&bits, 57, 1, ipb)
+	writeBits(&bits, 0, 28, int64(n28a))
+	writeBits(&bits, 28, 1, int64(ipa))
+	writeBits(&bits, 29, 28, int64(n28b))
+	writeBits(&bits, 57, 1, int64(ipb))
 
 	// Parse remaining parts.
 	ir := 0
@@ -412,9 +414,9 @@ func packStandardMessage(msg string) ([77]int8, int, bool) {
 	}
 doneGrid:
 
-	writeBits(&bits, 58, 1, ir)
-	writeBits(&bits, 59, 15, igrid4)
-	writeBits(&bits, 74, 3, i3)
+	writeBits(&bits, 58, 1, int64(ir))
+	writeBits(&bits, 59, 15, int64(igrid4))
+	writeBits(&bits, 74, 3, int64(i3))
 
 	return bits, i3, true
 }
@@ -426,7 +428,8 @@ func packNonStandardCall(msg string) ([77]int8, bool) {
 		return [77]int8{}, false
 	}
 
-	var n12, n58, iflip, nrpt, icq int
+	var n12, iflip, nrpt, icq int
+	var n58 int64
 
 	if len(parts) == 2 {
 		if parts[0] == "CQ" {
@@ -502,18 +505,19 @@ func packNonStandardCall(msg string) ([77]int8, bool) {
 	}
 
 	var bits [77]int8
-	writeBits(&bits, 0, 12, n12)
+	writeBits(&bits, 0, 12, int64(n12))
 	writeBits(&bits, 12, 58, n58)
-	writeBits(&bits, 70, 1, iflip)
-	writeBits(&bits, 71, 2, nrpt)
-	writeBits(&bits, 73, 1, icq)
+	writeBits(&bits, 70, 1, int64(iflip))
+	writeBits(&bits, 71, 2, int64(nrpt))
+	writeBits(&bits, 73, 1, int64(icq))
 	writeBits(&bits, 74, 3, 4)
 
 	return bits, true
 }
 
 // packNonStdCall58 encodes an 11-char non-standard callsign into 58 bits.
-func packNonStdCall58(callsign string) int {
+// Returns -1 on error. Uses int64 to avoid overflow on 32-bit platforms.
+func packNonStdCall58(callsign string) int64 {
 	cs := strings.ToUpper(callsign)
 	if len(cs) > 11 {
 		cs = cs[:11]
@@ -531,7 +535,7 @@ func packNonStdCall58(callsign string) int {
 		}
 		n58 = n58*38 + int64(idx)
 	}
-	return int(n58)
+	return n58
 }
 
 // packRTTYContest encodes an ARRL RTTY Contest message (i3=3).
@@ -610,12 +614,12 @@ func packRTTYContest(msg string) ([77]int8, bool) {
 	}
 
 	var bits [77]int8
-	writeBits(&bits, 0, 1, itu)
-	writeBits(&bits, 1, 28, n28a)
-	writeBits(&bits, 29, 28, n28b)
-	writeBits(&bits, 57, 1, ir)
-	writeBits(&bits, 58, 3, irpt)
-	writeBits(&bits, 61, 13, nexch)
+	writeBits(&bits, 0, 1, int64(itu))
+	writeBits(&bits, 1, 28, int64(n28a))
+	writeBits(&bits, 29, 28, int64(n28b))
+	writeBits(&bits, 57, 1, int64(ir))
+	writeBits(&bits, 58, 3, int64(irpt))
+	writeBits(&bits, 61, 13, int64(nexch))
 	writeBits(&bits, 74, 3, 3)
 
 	return bits, true
@@ -676,12 +680,12 @@ func packEUVHF(msg string) ([77]int8, bool) {
 	SaveHashCall(call2)
 
 	var bits [77]int8
-	writeBits(&bits, 0, 12, n12)
-	writeBits(&bits, 12, 22, n22)
-	writeBits(&bits, 34, 1, ir)
-	writeBits(&bits, 35, 3, irpt)
-	writeBits(&bits, 38, 11, iserial)
-	writeBits(&bits, 49, 25, igrid6)
+	writeBits(&bits, 0, 12, int64(n12))
+	writeBits(&bits, 12, 22, int64(n22))
+	writeBits(&bits, 34, 1, int64(ir))
+	writeBits(&bits, 35, 3, int64(irpt))
+	writeBits(&bits, 38, 11, int64(iserial))
+	writeBits(&bits, 49, 25, int64(igrid6))
 	writeBits(&bits, 74, 3, 5)
 
 	return bits, true

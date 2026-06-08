@@ -2,9 +2,7 @@ package goft8
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
-	"io"
 	"math"
 	"os"
 )
@@ -153,110 +151,6 @@ func clampSNR(snr float64) int {
 		return 49
 	}
 	return n
-}
-
-// ReadWAVMono12k decodes a PCM WAV file into float32 mono samples at
-// 12 kHz. It accepts 16-bit integer or 32-bit float PCM at 12 kHz mono
-// and rejects anything else with a descriptive error.
-func ReadWAVMono12k(path string) ([]float32, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	var riff [12]byte
-	if _, err := io.ReadFull(f, riff[:]); err != nil {
-		return nil, fmt.Errorf("goft8: read RIFF header: %w", err)
-	}
-	if string(riff[0:4]) != "RIFF" || string(riff[8:12]) != "WAVE" {
-		return nil, errors.New("goft8: not a RIFF/WAVE file")
-	}
-
-	var (
-		fmtFound    bool
-		audioFormat uint16
-		numChannels uint16
-		sampleRate  uint32
-		bitsPer     uint16
-	)
-
-	for {
-		var hdr [8]byte
-		if _, err := io.ReadFull(f, hdr[:]); err != nil {
-			return nil, fmt.Errorf("goft8: read chunk header: %w", err)
-		}
-		chunkID := string(hdr[0:4])
-		chunkSize := binary.LittleEndian.Uint32(hdr[4:8])
-
-		switch chunkID {
-		case "fmt ":
-			body := make([]byte, chunkSize)
-			if _, err := io.ReadFull(f, body); err != nil {
-				return nil, fmt.Errorf("goft8: read fmt chunk: %w", err)
-			}
-			if len(body) < 16 {
-				return nil, errors.New("goft8: fmt chunk too short")
-			}
-			audioFormat = binary.LittleEndian.Uint16(body[0:2])
-			numChannels = binary.LittleEndian.Uint16(body[2:4])
-			sampleRate = binary.LittleEndian.Uint32(body[4:8])
-			bitsPer = binary.LittleEndian.Uint16(body[14:16])
-			fmtFound = true
-		case "data":
-			if !fmtFound {
-				return nil, errors.New("goft8: data chunk before fmt chunk")
-			}
-			if numChannels != 1 {
-				return nil, fmt.Errorf("goft8: want mono WAV, got %d channels", numChannels)
-			}
-			if sampleRate != AudioSampleRate {
-				return nil, fmt.Errorf("goft8: want %d Hz WAV, got %d Hz", AudioSampleRate, sampleRate)
-			}
-			return readWAVSamples(f, int(chunkSize), audioFormat, bitsPer)
-		default:
-			if _, err := io.CopyN(io.Discard, f, int64(chunkSize)); err != nil {
-				return nil, fmt.Errorf("goft8: skip %s chunk: %w", chunkID, err)
-			}
-			if chunkSize%2 == 1 {
-				if _, err := io.CopyN(io.Discard, f, 1); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-}
-
-func readWAVSamples(r io.Reader, size int, format uint16, bitsPer uint16) ([]float32, error) {
-	switch {
-	case format == 1 && bitsPer == 16:
-		n := size / 2
-		buf := make([]byte, size)
-		if _, err := io.ReadFull(r, buf); err != nil {
-			return nil, err
-		}
-		out := make([]float32, n)
-		for i := 0; i < n; i++ {
-			s := int16(binary.LittleEndian.Uint16(buf[i*2 : i*2+2]))
-			// Match MSHV static_dat0 = raw_in_s * 0.000390625 scaling.
-			out[i] = float32(s) * 0.000390625
-		}
-		return out, nil
-	case format == 3 && bitsPer == 32:
-		n := size / 4
-		buf := make([]byte, size)
-		if _, err := io.ReadFull(r, buf); err != nil {
-			return nil, err
-		}
-		out := make([]float32, n)
-		for i := 0; i < n; i++ {
-			bits := binary.LittleEndian.Uint32(buf[i*4 : i*4+4])
-			out[i] = math.Float32frombits(bits)
-		}
-		return out, nil
-	default:
-		return nil, fmt.Errorf("goft8: unsupported WAV format=%d bits=%d (want PCM16 or float32)", format, bitsPer)
-	}
 }
 
 // WriteWAVMono12k writes mono float32 PCM samples as a 16-bit PCM WAV

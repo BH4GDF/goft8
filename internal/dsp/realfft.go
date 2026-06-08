@@ -1,4 +1,6 @@
-// realfft.go — Real-to-complex FFT wrapper using FFTW3.
+// realfft.go — Real-to-complex FFT wrapper.
+//
+// The fftw branch delegates real FFTs to FFTW3 through CGO.
 
 package dsp
 

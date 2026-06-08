@@ -30,9 +30,9 @@ var captureFixtures = []struct {
 		// MSHV-enhanced decoder yields 11 here (vs 10 in WSJT-X 2.7.0 port); the 11th
 		// The extra signal "<...> RA6ABC KN96" is recovered via the 5th LLR
 		// set (bmete) and finer 0.25 Hz frequency search.
-		name: "ft8_cap1",
-		file: "ft8_cap1.wav",
-		want: 11,
+		name:    "ft8_cap1",
+		file:    "ft8_cap1.wav",
+		want:    11,
 		freqMin: 200,
 		freqMax: 2600,
 		mustSee: []string{
@@ -42,9 +42,9 @@ var captureFixtures = []struct {
 		},
 	},
 	{
-		name: "ft8_cap2",
-		file: "ft8_cap2.wav",
-		want: 15,
+		name:    "ft8_cap2",
+		file:    "ft8_cap2.wav",
+		want:    15,
 		freqMin: 200,
 		freqMax: 2600,
 		mustSee: []string{
@@ -54,9 +54,9 @@ var captureFixtures = []struct {
 		},
 	},
 	{
-		name: "ft8_cap3",
-		file: "ft8_cap3.wav",
-		want: 23,
+		name:    "ft8_cap3",
+		file:    "ft8_cap3.wav",
+		want:    23,
 		freqMin: 200,
 		freqMax: 2600,
 		mustSee: []string{
@@ -67,9 +67,9 @@ var captureFixtures = []struct {
 		},
 	},
 	{
-		name: "ft8_cap4",
-		file: "ft8_cap4.wav",
-		want: 21,
+		name:    "ft8_cap4",
+		file:    "ft8_cap4.wav",
+		want:    21,
 		freqMin: 100,
 		freqMax: 3000,
 		mustSee: []string{

@@ -58,6 +58,12 @@ type DecodeParams struct {
 	// OnCandidate is called synchronously each time a new signal is
 	// successfully decoded during iterative decoding. Keep it fast.
 	OnCandidate func(DecodeCandidate)
+	// AdaptiveOSD enables adaptive OSD depth based on signal priority.
+	// When true, OSD depth is dynamically adjusted: non-AP passes use
+	// ndeep=3 (order-1 + pre1 + pre2), AP passes near QSO frequency use
+	// ndeep=4 (order-2 + pre1 + pre2). Only effective when Depth >= 3.
+	// Matches MSHV ws300rc1 adaptive OSD strategy.
+	AdaptiveOSD bool
 }
 
 // DecodeCandidate is the result of decoding one FT8 signal candidate.
@@ -319,6 +325,19 @@ func DecodeSingle(
 			maxosd = 0 // uncoupled BP+OSD
 		}
 		// ndepth >= 3: maxosd stays at 2 (default)
+
+		// Adaptive OSD depth (MSHV ws300rc1 strategy).
+		// Non-AP passes: ndeep=3 (order-1 + pre1 + pre2) — deeper than default ndeep=2.
+		// AP passes near QSO frequency: ndeep=4 (order-2 + pre1 + pre2).
+		if params.AdaptiveOSD && ndepth >= 3 && maxosd >= 0 {
+			norder = 3 // MSHV baseline for non-AP passes
+			if ipass > 5 && iaptype > 0 {
+				// AP pass: use deeper search when signal is near QSO frequency.
+				if params.NfQSO > 0 && math.Abs(f1-params.NfQSO) <= params.APWidth {
+					norder = 4 // MSHV QSO-priority
+				}
+			}
+		}
 
 		// LDPC decode (ft8b.f90 lines 413–418)
 		var result ldpc.DecodeResult
@@ -588,18 +607,21 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 
 			decoded := make([]decodeWorkerResult, len(candidates))
 
+			// Precompute the 192000-point FFT once and share across workers.
+			sharedDS := decode.NewDownsampler()
+			newdatShared := true
+			sharedDS.Downsample(dd, &newdatShared, candidates[0].Freq)
+
 			jobs := make(chan decodeJob, len(candidates))
 			var wg sync.WaitGroup
 			for w := 0; w < nw; w++ {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					ds := decode.NewDownsampler()
-					first := true
+					ds := decode.CloneFrom(sharedDS)
+					defer ds.Release()
 					for job := range jobs {
-						newdat := first
-						first = false
-						res, ok := DecodeSingle(dd, ds, job.cand.Freq, job.cand.DT, newdat, passParams, job.xbase)
+						res, ok := DecodeSingle(dd, ds, job.cand.Freq, job.cand.DT, false, passParams, job.xbase)
 						if ok {
 							decoded[job.idx] = decodeWorkerResult{
 								result: res,
@@ -625,6 +647,7 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 			}
 			close(jobs)
 			wg.Wait()
+			sharedDS.Release()
 
 			var toSubtract []decode.SubtractSignal
 			for i := range candidates {
@@ -706,6 +729,7 @@ func DecodeIterative(audio []float32, params DecodeParams, freqMin, freqMax floa
 				// Use unadjusted DT for subtraction (result.DT has been adjusted, add 0.5 back)
 				decode.SubtractFT8(dd, result.Tones, result.Freq, result.DT+0.5)
 			}
+			ds.Release()
 		}
 
 		prevPassDecodes = passDecodes

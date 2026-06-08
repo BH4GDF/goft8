@@ -46,6 +46,11 @@ func decodeLDPCCGO(llr [ft8params.LDPCn]float64, maxOSD, norder int, apmask [ft8
 	var result DecodeResult
 	result.NHardErrors = nhard
 	result.Dmin = float64(cdmin)
+	if maxOSD < 0 || nhard == 0 {
+		result.DecoderType = 1
+	} else {
+		result.DecoderType = 2
+	}
 	for i := 0; i < k; i++ {
 		result.Message91[i] = int8(cmsg91[i])
 	}

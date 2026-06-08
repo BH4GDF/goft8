@@ -19,12 +19,6 @@ import (
 //
 // Parameters and return values are identical to DecodeLDPC.
 func DecodeLDPCF32(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apmask [ft8params.LDPCn]int8) (DecodeResult, bool) {
-	return decodeLDPCCGO(llr, maxOSD, ndeep, apmask)
-}
-
-// decodeLDPCF32Go is the pure-Go fallback implementation.
-// Kept for reference and potential future use.
-func decodeLDPCF32Go(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apmask [ft8params.LDPCn]int8) (DecodeResult, bool) {
 	const (
 		n             = ft8params.LDPCn
 		m             = ft8params.LDPCm
@@ -36,6 +30,8 @@ func decodeLDPCF32Go(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apma
 	if maxOSD > 3 {
 		maxOSD = 3
 	}
+
+	initBPTables()
 
 	// Convert input LLR to float32.
 	var llr32 [n]float32
@@ -71,10 +67,13 @@ func decodeLDPCF32Go(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apma
 	nclast := 0
 	var zsum [n]float32
 
+	// Hoist loop-local arrays outside the iteration loop.
+	var zn [n]float32
+	var cw [n]int8
+
 	// decode174_91.f90 lines 52–135: BP iterations.
 	for iter := 0; iter <= maxIterations; iter++ {
 		// Update bit LLR estimates (decode174_91.f90 lines 54–60).
-		var zn [n]float32
 		for i := 0; i < n; i++ {
 			if apmask[i] != 1 {
 				sum := llr32[i]
@@ -96,10 +95,11 @@ func decodeLDPCF32Go(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apma
 		}
 
 		// Hard decision (decode174_91.f90 lines 67–68).
-		var cw [n]int8
 		for i := 0; i < n; i++ {
 			if zn[i] > 0 {
 				cw[i] = 1
+			} else {
+				cw[i] = 0
 			}
 		}
 
@@ -174,6 +174,7 @@ func decodeLDPCF32Go(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apma
 				for kk := 0; kk < ncw; kk++ {
 					if LDPCMn[bit][kk]-1 == j {
 						v -= tov[bit][kk]
+						break
 					}
 				}
 				toc[j][i] = v
@@ -181,18 +182,22 @@ func decodeLDPCF32Go(llr [ft8params.LDPCn]float64, keff, maxOSD, ndeep int, apma
 		}
 
 		// Check→variable messages (decode174_91.f90 lines 121–133).
+		// Use fastTanh LUT instead of math.Tanh.
 		for j := 0; j < m; j++ {
 			for i := 0; i < 7; i++ {
-				tanhtoc[j][i] = float32(math.Tanh(float64(-toc[j][i]) / 2.0))
+				tanhtoc[j][i] = float32(fastTanh(float64(-toc[j][i]) / 2.0))
 			}
 		}
 
+		// Check→variable product with pre-computed skip index.
 		for bit := 0; bit < n; bit++ {
 			for kk := 0; kk < ncw; kk++ {
 				chk := LDPCMn[bit][kk] - 1
+				skip := prodSkip[bit][kk]
 				prod := float32(1.0)
-				for i := 0; i < LDPCNrw[chk]; i++ {
-					if LDPCNm[chk][i]-1 != bit {
+				nrw := LDPCNrw[chk]
+				for i := 0; i < nrw; i++ {
+					if i != skip {
 						prod *= tanhtoc[chk][i]
 					}
 				}

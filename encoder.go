@@ -71,13 +71,13 @@ func clampTxFreq(hz float64) float64 {
 }
 
 // WithSampleRate sets the output sample rate in Hz.
-// Supported values are 12000 (default) and 48000.
+// Supported values are 12000 and 48000. Defaults to 48000.
 func WithSampleRate(sr int) EncoderOption {
 	return func(c *encoderConfig) { c.sampleRate = sr }
 }
 
 // WithBitDepth sets the output PCM bit depth.
-// Supported values are 16 (default), 24, and 32.
+// Supported values are 16, 24, and 32. Defaults to 24.
 func WithBitDepth(bits int) EncoderOption {
 	return func(c *encoderConfig) { c.bitDepth = bits }
 }
@@ -98,17 +98,83 @@ func (e *Encoder) txSamples() int {
 	return nwave
 }
 
-// encodeBufPool reuses the txSamples-length buffers needed by
-// EncodeMulti.  Each goroutine borrows its own.
-var encodeBufPool = sync.Pool{
-	New: func() interface{} {
-		return make([]float32, NTXSamples)
-	},
+func (e *Encoder) validateSampleRate() error {
+	if e.cfg.sampleRate != 12000 && e.cfg.sampleRate != 48000 {
+		return fmt.Errorf("ft8: unsupported sample rate %d (want 12000 or 48000)", e.cfg.sampleRate)
+	}
+	return nil
+}
+
+func (e *Encoder) validatePCMConfig() error {
+	if err := e.validateSampleRate(); err != nil {
+		return err
+	}
+	if e.cfg.bitDepth != 16 && e.cfg.bitDepth != 24 && e.cfg.bitDepth != 32 {
+		return fmt.Errorf("ft8: unsupported bit depth %d (want 16, 24, or 32)", e.cfg.bitDepth)
+	}
+	return nil
+}
+
+// encodeBufPools reuse txSamples-length buffers needed by EncodeMulti and
+// EncodeToBytes. Keep one bounded persistent pool per supported sample rate so
+// large 48 kHz buffers survive GC without retaining unbounded memory.
+var encodeBufPools = map[int]*encodeBufferPool{
+	12000: newEncodeBufferPool(NTXSamples),
+	48000: newEncodeBufferPool(NTXSamples * 4),
+}
+
+type encodeBufferPool struct {
+	size int
+	ch   chan []float32
+}
+
+func newEncodeBufferPool(size int) *encodeBufferPool {
+	return &encodeBufferPool{
+		size: size,
+		ch:   make(chan []float32, 4),
+	}
+}
+
+func (p *encodeBufferPool) get() []float32 {
+	select {
+	case buf := <-p.ch:
+		return buf[:p.size]
+	default:
+		return make([]float32, p.size)
+	}
+}
+
+func (p *encodeBufferPool) put(buf []float32) {
+	if cap(buf) < p.size {
+		return
+	}
+	buf = buf[:p.size]
+	select {
+	case p.ch <- buf:
+	default:
+	}
+}
+
+func encodeBufGet(sampleRate int) []float32 {
+	pool := encodeBufPools[sampleRate]
+	return pool.get()
+}
+
+func encodeBufPut(sampleRate int, buf []float32) {
+	pool := encodeBufPools[sampleRate]
+	if pool == nil {
+		return
+	}
+	pool.put(buf)
 }
 
 // Encode generates the GFSK-modulated waveform for a single FT8
 // message. Returns float32 samples at the configured sample rate.
 func (e *Encoder) Encode(msg string) ([]float32, error) {
+	if err := e.validateSampleRate(); err != nil {
+		return nil, err
+	}
+
 	bits, _, _, ok := protocol.Pack77(msg)
 	if !ok {
 		return nil, fmt.Errorf("ft8: cannot pack message %q", msg)
@@ -133,18 +199,18 @@ func (e *Encoder) EncodeMulti(msgs []MessageFreq) ([]float32, error) {
 	if len(msgs) == 0 {
 		return nil, fmt.Errorf("ft8: no messages to encode")
 	}
+	if err := e.validateSampleRate(); err != nil {
+		return nil, err
+	}
 
 	nsamples := e.txSamples()
 
 	// Borrow a zeroed accumulation buffer from the pool.
-	sum := encodeBufPool.Get().([]float32)
+	sum := encodeBufGet(e.cfg.sampleRate)
 	for i := range sum {
 		sum[i] = 0
 	}
-	// Ensure the buffer is large enough for the configured rate.
-	if len(sum) < nsamples {
-		sum = make([]float32, nsamples)
-	}
+	sum = sum[:nsamples]
 
 	// Keep track of accepted frequencies (in list order) for spacing checks.
 	var accepted []float64
@@ -159,7 +225,7 @@ func (e *Encoder) EncodeMulti(msgs []MessageFreq) ([]float32, error) {
 		f0 := clampTxFreq(mf.Freq)
 		for _, prev := range accepted {
 			if math.Abs(f0-prev) < 60.0 {
-				encodeBufPool.Put(sum[:NTXSamples])
+				encodeBufPut(e.cfg.sampleRate, sum)
 				return nil, fmt.Errorf("ft8: message %d frequency %.1f Hz is too close to earlier message at %.1f Hz (min spacing 60 Hz)", i, f0, prev)
 			}
 		}
@@ -167,7 +233,7 @@ func (e *Encoder) EncodeMulti(msgs []MessageFreq) ([]float32, error) {
 
 		bits, _, _, ok := protocol.Pack77(mf.Message)
 		if !ok {
-			encodeBufPool.Put(sum[:NTXSamples])
+			encodeBufPut(e.cfg.sampleRate, sum)
 			return nil, fmt.Errorf("ft8: cannot pack message %q", mf.Message)
 		}
 		jobs = append(jobs, waveJob{f0: f0, bits: bits})
@@ -182,10 +248,17 @@ func (e *Encoder) EncodeMulti(msgs []MessageFreq) ([]float32, error) {
 		go func(idx int, j waveJob) {
 			defer wg.Done()
 			itone := encode.GenFT8Tones(j.bits)
-			waves[idx] = encode.GenFT8WaveSR(itone, j.f0, e.cfg.sampleRate)
+			wave := encodeBufGet(e.cfg.sampleRate)[:nsamples]
+			encode.GenFT8WaveInto(wave, itone, j.f0, e.cfg.sampleRate)
+			waves[idx] = wave
 		}(i, job)
 	}
 	wg.Wait()
+	defer func() {
+		for _, wave := range waves {
+			encodeBufPut(e.cfg.sampleRate, wave)
+		}
+	}()
 
 	// Accumulate waveforms. For 3+ messages use parallel reduction over
 	// segments of the sample buffer to saturate memory bandwidth.
@@ -231,17 +304,30 @@ func (e *Encoder) EncodeMulti(msgs []MessageFreq) ([]float32, error) {
 		waveform[i] = v / scale
 	}
 
-	encodeBufPool.Put(sum[:NTXSamples])
+	encodeBufPut(e.cfg.sampleRate, sum)
 	return waveform, nil
 }
 
 // EncodeToBytes generates the waveform and converts it to raw PCM bytes
 // at the configured sample rate and bit depth.
 func (e *Encoder) EncodeToBytes(msg string) ([]byte, error) {
-	wave, err := e.Encode(msg)
-	if err != nil {
+	if err := e.validatePCMConfig(); err != nil {
 		return nil, err
 	}
+
+	bits, _, _, ok := protocol.Pack77(msg)
+	if !ok {
+		return nil, fmt.Errorf("ft8: cannot pack message %q", msg)
+	}
+
+	nsamples := e.txSamples()
+	wave := encodeBufGet(e.cfg.sampleRate)[:nsamples]
+	defer encodeBufPut(e.cfg.sampleRate, wave)
+
+	itone := encode.GenFT8Tones(bits)
+	f0 := clampTxFreq(e.cfg.txFreq)
+	encode.GenFT8WaveInto(wave, itone, f0, e.cfg.sampleRate)
+
 	return FloatToPCM(wave, e.cfg.bitDepth), nil
 }
 
@@ -249,16 +335,27 @@ func (e *Encoder) EncodeToBytes(msg string) ([]byte, error) {
 func FloatToPCM(samples []float32, bitDepth int) []byte {
 	switch bitDepth {
 	case 24:
-		return floatToPCM24(samples)
+		data := make([]byte, len(samples)*3)
+		floatToPCM24Into(data, samples)
+		return data
 	case 32:
-		return floatToPCM32(samples)
+		data := make([]byte, len(samples)*4)
+		floatToPCM32Into(data, samples)
+		return data
 	default:
-		return floatToPCM16(samples)
+		data := make([]byte, len(samples)*2)
+		floatToPCM16Into(data, samples)
+		return data
 	}
 }
 
 func floatToPCM16(samples []float32) []byte {
 	data := make([]byte, len(samples)*2)
+	floatToPCM16Into(data, samples)
+	return data
+}
+
+func floatToPCM16Into(data []byte, samples []float32) {
 	for i, v := range samples {
 		if v > 1.0 {
 			v = 1.0
@@ -268,11 +365,15 @@ func floatToPCM16(samples []float32) []byte {
 		s := int16(v * 32767.0)
 		binary.LittleEndian.PutUint16(data[i*2:], uint16(s))
 	}
-	return data
 }
 
 func floatToPCM24(samples []float32) []byte {
 	data := make([]byte, len(samples)*3)
+	floatToPCM24Into(data, samples)
+	return data
+}
+
+func floatToPCM24Into(data []byte, samples []float32) {
 	for i, v := range samples {
 		if v > 1.0 {
 			v = 1.0
@@ -291,11 +392,15 @@ func floatToPCM24(samples []float32) []byte {
 		data[i*3+1] = byte((s >> 8) & 0xFF)
 		data[i*3+2] = byte((s >> 16) & 0xFF)
 	}
-	return data
 }
 
 func floatToPCM32(samples []float32) []byte {
 	data := make([]byte, len(samples)*4)
+	floatToPCM32Into(data, samples)
+	return data
+}
+
+func floatToPCM32Into(data []byte, samples []float32) {
 	for i, v := range samples {
 		if v > 1.0 {
 			v = 1.0
@@ -305,5 +410,4 @@ func floatToPCM32(samples []float32) []byte {
 		s := int32(v * 2147483647.0)
 		binary.LittleEndian.PutUint32(data[i*4:], uint32(s))
 	}
-	return data
 }

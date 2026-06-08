@@ -127,7 +127,7 @@ func GenFT8DPhi(itone [ft8params.NN]int, f0 float64, sampleRate int) []float64 {
 	pulseLen := len(pulsePeak)
 
 	dphiLen := (encodeNSym + 2) * nsps
-	dphi := make([]float64, dphiLen)
+	dphi := dphiPoolGet(dphiLen)
 
 	// Accumulate pulse-shaped frequency deviation for each symbol.
 	for j := 0; j < encodeNSym; j++ {
@@ -160,6 +160,72 @@ func GenFT8DPhi(itone [ft8params.NN]int, f0 float64, sampleRate int) []float64 {
 	return dphi
 }
 
+// PutDPhi returns a dphi slice to the pool for reuse.
+// Callers that obtain dphi from GenFT8DPhi should call PutDPhi when done.
+func PutDPhi(dphi []float64) {
+	dphiPoolPut(dphi)
+}
+
+// dphiPool reuses large dphi buffers with bounded retention. The 48 kHz
+// variant is about 4x the 12 kHz buffer, so keep separate pools by length.
+var dphiPools = []*dphiBufferPool{
+	newDphiBufferPool((ft8params.NN + 2) * ft8params.NSPS),
+	newDphiBufferPool((ft8params.NN + 2) * ft8params.NSPS * 4),
+}
+
+type dphiBufferPool struct {
+	size int
+	ch   chan []float64
+}
+
+func newDphiBufferPool(size int) *dphiBufferPool {
+	return &dphiBufferPool{
+		size: size,
+		ch:   make(chan []float64, 4),
+	}
+}
+
+func (p *dphiBufferPool) get() []float64 {
+	select {
+	case buf := <-p.ch:
+		return buf[:p.size]
+	default:
+		return make([]float64, p.size)
+	}
+}
+
+func (p *dphiBufferPool) put(buf []float64) {
+	if cap(buf) < p.size {
+		return
+	}
+	buf = buf[:p.size]
+	for i := range buf {
+		buf[i] = 0
+	}
+	select {
+	case p.ch <- buf:
+	default:
+	}
+}
+
+func dphiPoolGet(n int) []float64 {
+	for _, pool := range dphiPools {
+		if pool.size >= n {
+			return pool.get()[:n]
+		}
+	}
+	return make([]float64, n)
+}
+
+func dphiPoolPut(buf []float64) {
+	for _, pool := range dphiPools {
+		if cap(buf) == pool.size {
+			pool.put(buf)
+			return
+		}
+	}
+}
+
 // GenFT8CWave generates the complex GFSK reference waveform for a signal
 // at frequency f0 with the given tone sequence.
 //
@@ -176,6 +242,7 @@ func GenFT8CWave(itone [ft8params.NN]int, f0 float64) []complex128 {
 func GenFT8CWaveSR(itone [ft8params.NN]int, f0 float64, sampleRate int) []complex128 {
 	nsps, nwave, _ := EncodeParams(sampleRate)
 	dphi := GenFT8DPhi(itone, f0, sampleRate)
+	defer PutDPhi(dphi)
 
 	cwave := make([]complex128, nwave)
 	phi := 0.0
@@ -213,10 +280,20 @@ func GenFT8Wave(itone [ft8params.NN]int, f0 float64) []float32 {
 // GenFT8WaveSR generates the real-valued GFSK waveform at an arbitrary
 // sample rate.  Supported rates are 12000 and 48000 Hz.
 func GenFT8WaveSR(itone [ft8params.NN]int, f0 float64, sampleRate int) []float32 {
-	nsps, nwave, _ := EncodeParams(sampleRate)
-	dphi := GenFT8DPhi(itone, f0, sampleRate)
-
+	_, nwave, _ := EncodeParams(sampleRate)
 	wave := make([]float32, nwave)
+	GenFT8WaveInto(wave, itone, f0, sampleRate)
+	return wave
+}
+
+// GenFT8WaveInto writes the real-valued GFSK waveform into dst.
+// dst must have length at least the frame length for sampleRate.
+func GenFT8WaveInto(dst []float32, itone [ft8params.NN]int, f0 float64, sampleRate int) {
+	nsps, nwave, _ := EncodeParams(sampleRate)
+	wave := dst[:nwave]
+	dphi := GenFT8DPhi(itone, f0, sampleRate)
+	defer PutDPhi(dphi)
+
 	phi := 0.0
 	for k := 0; k < nwave; k++ {
 		j := nsps + k
@@ -236,6 +313,4 @@ func GenFT8WaveSR(itone [ft8params.NN]int, f0 float64, sampleRate int) []float32
 		ramp := float32((1.0 + math.Cos(encodeTwopi*float64(i)/float64(2*nramp))) / 2.0)
 		wave[k1+i] *= ramp
 	}
-
-	return wave
 }

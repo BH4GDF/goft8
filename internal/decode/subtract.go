@@ -114,6 +114,7 @@ func SubtractFT8(dd []float32, itone [ft8params.NN]int, f0, xdt float64) {
 
 	// Conjugate-multiply: camp[i] = dd[nstart-1+i] * conj(cref[i])
 	cfilt := cfiltPool.Get().([]complex128)
+	defer cfiltPool.Put(cfilt)
 	for i := 0; i < ft8params.NMAX; i++ {
 		cfilt[i] = 0
 	}
@@ -153,7 +154,6 @@ func SubtractFT8(dd []float32, itone [ft8params.NN]int, f0, xdt float64) {
 			dd[j] -= 2.0 * float32(real(z))
 		}
 	}
-	cfiltPool.Put(cfilt)
 }
 
 // copyCWave fills dst with the complex GFSK reference waveform.
@@ -161,6 +161,7 @@ func SubtractFT8(dd []float32, itone [ft8params.NN]int, f0, xdt float64) {
 func copyCWave(dst []complex128, itone [ft8params.NN]int, f0 float64) {
 	// Reuse the shared dphi computation.
 	dphi := encode.GenFT8DPhi(itone, f0, ft8params.Fs)
+	defer encode.PutDPhi(dphi)
 
 	phi := 0.0
 	for k := 0; k < ft8params.NFRAME; k++ {
@@ -215,10 +216,14 @@ func BatchSubtractFT8(dd []float32, signals []SubtractSignal) {
 		go func(idx int, sig SubtractSignal) {
 			defer wg.Done()
 
-			cref := encode.GenFT8CWave(sig.Tones, sig.Freq)
+			cref := cwavePool.Get().([]complex128)
+			copyCWave(cref, sig.Tones, sig.Freq)
 			nstart := int(sig.DT*ft8params.Fs) + 1
 
-			cfilt := make([]complex128, ft8params.NMAX)
+			cfilt := cfiltPool.Get().([]complex128)
+			for i := 0; i < ft8params.NMAX; i++ {
+				cfilt[i] = 0
+			}
 
 			for j := 0; j < ft8params.NFRAME; j++ {
 				k := nstart - 1 + j
@@ -227,11 +232,11 @@ func BatchSubtractFT8(dd []float32, signals []SubtractSignal) {
 				}
 			}
 
-			cfilt = dsp.FFT(cfilt)
+			dsp.FFTInto(cfilt, cfilt)
 			for j := range cfilt {
 				cfilt[j] *= subtractFilterFreq[j]
 			}
-			cfilt = dsp.IFFT(cfilt)
+			dsp.IFFTInto(cfilt, cfilt)
 
 			for j := 0; j <= halfFilt; j++ {
 				cfilt[j] *= complex(subtractEndCorrection[j], 0)
@@ -245,7 +250,7 @@ func BatchSubtractFT8(dd []float32, signals []SubtractSignal) {
 
 	wg.Wait()
 
-	// Serial subtract to avoid races on dd.
+	// Serial subtract to avoid races on dd, then return buffers to pools.
 	for _, r := range results {
 		for i := 0; i < ft8params.NFRAME; i++ {
 			j := r.nstart - 1 + i
@@ -254,5 +259,7 @@ func BatchSubtractFT8(dd []float32, signals []SubtractSignal) {
 				dd[j] -= 2.0 * float32(real(z))
 			}
 		}
+		cwavePool.Put(r.cref)
+		cfiltPool.Put(r.cfilt)
 	}
 }

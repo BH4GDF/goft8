@@ -28,6 +28,5 @@
 // goft8 is not a binding of WSJT-X or JTDX; it is an original Go
 // implementation of the published FT8 protocol, developed with
 // reference to the GPLv3 WSJT-X 2.7.0 Fortran source. The Go code is
-// licensed under MIT. See NOTICE for the clean-room attribution
-// statement.
+// licensed under GPL v3. See README.md for clean-room attribution.
 package goft8

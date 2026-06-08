@@ -10,6 +10,7 @@ import (
 	ft8params "github.com/bh4gdf/goft8/params"
 	"math"
 	"math/cmplx"
+	"sync"
 )
 
 // Downsampler holds cached FFT state so the expensive 192000-point
@@ -21,14 +22,27 @@ import (
 //	real taper(0:100)
 //	save x,cx,first,taper
 type Downsampler struct {
-	cx    []complex128 // Cached spectrum (NFFT1DS/2+1 elements)
-	taper [101]float64 // Raised-cosine edge taper
-	c1buf []complex128 // Reused buffer for downsample intermediate (nfft2)
-	xbuf  []float32    // Reused buffer for input scaling
-	ready bool
+	cx       []complex128 // Cached spectrum (NFFT1DS/2+1 elements)
+	taper    [101]float64 // Raised-cosine edge taper
+	c1buf    []complex128 // Reused buffer for downsample intermediate (nfft2)
+	xbuf     []float32    // Reused buffer for input scaling
+	ready    bool
+	sharedCX bool
 }
 
 const cxLen = ft8params.NFFT1DS/2 + 1 // 96001
+
+var (
+	downsampleCXPool = sync.Pool{New: func() any {
+		return make([]complex128, cxLen)
+	}}
+	downsampleC1Pool = sync.Pool{New: func() any {
+		return make([]complex128, ft8params.NFFT2)
+	}}
+	downsampleXPool = sync.Pool{New: func() any {
+		return make([]float32, ft8params.NMAX)
+	}}
+)
 
 // NewDownsampler creates a Downsampler and precomputes the edge taper.
 //
@@ -48,6 +62,42 @@ func NewDownsampler() *Downsampler {
 		d.taper[i] = 0.5 * (1.0 + math.Cos(float64(i)*pi/100.0))
 	}
 	return d
+}
+
+// CloneFrom returns a new Downsampler that shares the pre-computed FFT
+// spectrum (cx) from `src`, avoiding the expensive 192000-point FFT.
+// The clone has its own c1buf and xbuf but reads from src's cached cx.
+// This is safe because Downsample only reads cx (never writes) after the
+// initial FFT computation.
+func CloneFrom(src *Downsampler) *Downsampler {
+	d := &Downsampler{
+		taper:    src.taper,
+		cx:       src.cx, // shared read-only reference
+		ready:    true,
+		sharedCX: true,
+	}
+	return d
+}
+
+// Release returns large reusable buffers held by the downsampler. A
+// Downsampler must not be used after Release.
+func (d *Downsampler) Release() {
+	if d == nil {
+		return
+	}
+	if d.cx != nil && !d.sharedCX && cap(d.cx) >= cxLen {
+		downsampleCXPool.Put(d.cx[:cxLen])
+	}
+	if d.c1buf != nil && cap(d.c1buf) >= ft8params.NFFT2 {
+		downsampleC1Pool.Put(d.c1buf[:ft8params.NFFT2])
+	}
+	if d.xbuf != nil && cap(d.xbuf) >= ft8params.NMAX {
+		downsampleXPool.Put(d.xbuf[:ft8params.NMAX])
+	}
+	d.cx = nil
+	d.c1buf = nil
+	d.xbuf = nil
+	d.ready = false
 }
 
 // Downsample mixes the audio in dd to baseband at f0 Hz, then decimates
@@ -75,11 +125,15 @@ func (d *Downsampler) Downsample(dd []float32, newdat *bool, f0 float64) []compl
 	//   endif
 	if *newdat || d.cx == nil {
 		if d.cx == nil {
-			d.cx = make([]complex128, cxLen)
+			d.cx = downsampleCXPool.Get().([]complex128)
 		}
 		// Match MSHV ft8_downsample: x[i] = dd[i] * 0.01
 		if len(d.xbuf) < len(dd) {
-			d.xbuf = make([]float32, len(dd))
+			if len(dd) <= ft8params.NMAX {
+				d.xbuf = downsampleXPool.Get().([]float32)
+			} else {
+				d.xbuf = make([]float32, len(dd))
+			}
 		}
 		x := d.xbuf[:len(dd)]
 		for i, v := range dd {
@@ -115,7 +169,7 @@ func (d *Downsampler) Downsample(dd []float32, newdat *bool, f0 float64) []compl
 
 	// Reuse or allocate c1 buffer.
 	if len(d.c1buf) < nfft2 {
-		d.c1buf = make([]complex128, nfft2)
+		d.c1buf = downsampleC1Pool.Get().([]complex128)
 	}
 	c1 := d.c1buf[:nfft2]
 	for i := range c1 {

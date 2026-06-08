@@ -31,8 +31,66 @@ func BenchmarkEncoderEncode(b *testing.B) {
 	}
 }
 
+func BenchmarkEncoderEncodeToBytes(b *testing.B) {
+	enc := NewEncoder(WithTxFreq(1500))
+	if _, err := enc.EncodeToBytes("CQ BH4GDF PM00"); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := enc.EncodeToBytes("CQ BH4GDF PM00")
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkEncoderEncodeToBytes_12k16(b *testing.B) {
+	enc := NewEncoder(WithTxFreq(1500), WithSampleRate(12000), WithBitDepth(16))
+	if _, err := enc.EncodeToBytes("CQ BH4GDF PM00"); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := enc.EncodeToBytes("CQ BH4GDF PM00")
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkEncoderEncodeMulti2(b *testing.B) {
 	enc := NewEncoder()
+	msgs := []MessageFreq{
+		{Message: "CQ BH4GDF PM00", Freq: 1200},
+		{Message: "BH4GDF BH4HKZ -10", Freq: 1800},
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := enc.EncodeMulti(msgs)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkEncoderEncodeMulti2_12k(b *testing.B) {
+	enc := NewEncoder(WithSampleRate(12000))
+	msgs := []MessageFreq{
+		{Message: "CQ BH4GDF PM00", Freq: 1200},
+		{Message: "BH4GDF BH4HKZ -10", Freq: 1800},
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := enc.EncodeMulti(msgs)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkEncoderEncodeMulti2_48k(b *testing.B) {
+	enc := NewEncoder(WithSampleRate(48000))
 	msgs := []MessageFreq{
 		{Message: "CQ BH4GDF PM00", Freq: 1200},
 		{Message: "BH4GDF BH4HKZ -10", Freq: 1800},

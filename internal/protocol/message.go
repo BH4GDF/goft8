@@ -86,6 +86,9 @@ func BitsToC77(bits [77]int8) string {
 // ────────────────────────────────────────────────────────────────────────────
 
 func readBits(c77 string, pos, nbits int) int64 {
+	if pos+nbits > len(c77) {
+		return 0
+	}
 	var v int64
 	for i := 0; i < nbits; i++ {
 		v = (v << 1) | int64(c77[pos+i]-'0')

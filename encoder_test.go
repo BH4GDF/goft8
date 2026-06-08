@@ -1,8 +1,91 @@
 package goft8
 
 import (
+	"strings"
 	"testing"
 )
+
+func TestEncoderDefaultConfig(t *testing.T) {
+	enc := NewEncoder()
+
+	wave, err := enc.Encode("CQ BH4GDF PM00")
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+	if want := NTXSamples * 4; len(wave) != want {
+		t.Fatalf("default sample rate length = %d samples, want %d", len(wave), want)
+	}
+
+	pcm, err := enc.EncodeToBytes("CQ BH4GDF PM00")
+	if err != nil {
+		t.Fatalf("EncodeToBytes failed: %v", err)
+	}
+	if want := len(wave) * 3; len(pcm) != want {
+		t.Fatalf("default PCM length = %d bytes, want %d", len(pcm), want)
+	}
+}
+
+func TestEncoderRejectsUnsupportedSampleRate(t *testing.T) {
+	enc := NewEncoder(WithSampleRate(44100))
+
+	if _, err := enc.Encode("CQ BH4GDF PM00"); err == nil || !strings.Contains(err.Error(), "unsupported sample rate 44100") {
+		t.Fatalf("Encode error = %v, want unsupported sample rate", err)
+	}
+
+	_, err := enc.EncodeMulti([]MessageFreq{
+		{Message: "CQ BH4GDF PM00", Freq: 1500},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported sample rate 44100") {
+		t.Fatalf("EncodeMulti error = %v, want unsupported sample rate", err)
+	}
+}
+
+func TestEncoderRejectsUnsupportedBitDepthForPCM(t *testing.T) {
+	enc := NewEncoder(WithBitDepth(20))
+
+	if _, err := enc.Encode("CQ BH4GDF PM00"); err != nil {
+		t.Fatalf("Encode should not depend on PCM bit depth, got %v", err)
+	}
+
+	if _, err := enc.EncodeToBytes("CQ BH4GDF PM00"); err == nil || !strings.Contains(err.Error(), "unsupported bit depth 20") {
+		t.Fatalf("EncodeToBytes error = %v, want unsupported bit depth", err)
+	}
+}
+
+func TestEncodeToBytesMatchesEncodeThenPCM(t *testing.T) {
+	tests := []struct {
+		name       string
+		sampleRate int
+		bitDepth   int
+	}{
+		{name: "default_48k_24bit", sampleRate: 48000, bitDepth: 24},
+		{name: "12k_16bit", sampleRate: 12000, bitDepth: 16},
+		{name: "12k_32bit", sampleRate: 12000, bitDepth: 32},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			enc := NewEncoder(WithTxFreq(1500), WithSampleRate(tt.sampleRate), WithBitDepth(tt.bitDepth))
+			wave, err := enc.Encode("CQ BH4GDF PM00")
+			if err != nil {
+				t.Fatalf("Encode failed: %v", err)
+			}
+			want := FloatToPCM(wave, tt.bitDepth)
+			got, err := enc.EncodeToBytes("CQ BH4GDF PM00")
+			if err != nil {
+				t.Fatalf("EncodeToBytes failed: %v", err)
+			}
+			if len(got) != len(want) {
+				t.Fatalf("PCM length = %d, want %d", len(got), len(want))
+			}
+			for i := range got {
+				if got[i] != want[i] {
+					t.Fatalf("PCM differs at byte %d: got %d want %d", i, got[i], want[i])
+				}
+			}
+		})
+	}
+}
 
 func TestEncoderTxFreqClamp(t *testing.T) {
 	// Below minimum: should clamp to 80 Hz.

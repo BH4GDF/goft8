@@ -2,171 +2,196 @@
 package main
 
 import (
-	"encoding/binary"
+	"encoding/json"
+	"flag"
 	"fmt"
-	"math"
+	"io"
 	"os"
 
 	"github.com/bh4gdf/goft8"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: %s <wavfile>\n", os.Args[0])
-		os.Exit(1)
+	if code := run(os.Args, os.Stdout, os.Stderr); code != 0 {
+		os.Exit(code)
+	}
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	prog := "decodewav"
+	if len(args) > 0 {
+		prog = args[0]
 	}
 
-	path := os.Args[1]
-
-	// Read WAV parameters.
-	sampleRate, bitDepth, pcmFormat, err := goft8.ReadWAVParams(path)
+	fs := flag.NewFlagSet(prog, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		freqMin = fs.Int("freq-min", 100, "Minimum decode frequency in Hz")
+		freqMax = fs.Int("freq-max", 3000, "Maximum decode frequency in Hz")
+		depth   = fs.String("depth", "normal", "Decode depth: fast, normal, or deep")
+		workers = fs.Int("workers", 0, "Worker count: 0 serial, >0 fixed, <0 auto")
+		jsonOut = fs.Bool("json", false, "Write decoded messages as JSON")
+	)
+	fs.Usage = func() {
+		fmt.Fprintf(stderr, "usage: %s [options] <wavfile>\n", prog)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return 1
+	}
+	if fs.NArg() != 1 {
+		fs.Usage()
+		return 1
+	}
+	if *freqMin < 0 || *freqMax <= *freqMin {
+		fmt.Fprintf(stderr, "invalid frequency range: freq-min=%d freq-max=%d\n", *freqMin, *freqMax)
+		return 1
+	}
+	decodeDepth, err := parseDepth(*depth)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "read wav params failed: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
 	}
 
-	if pcmFormat != 1 && pcmFormat != 3 {
-		fmt.Fprintf(os.Stderr, "unsupported PCM format %d (want 1=PCM or 3=IEEE float)\n", pcmFormat)
-		os.Exit(1)
-	}
+	path := fs.Arg(0)
 
-	// Read raw samples.
-	data, nsamp, err := readWAVData(path, bitDepth, pcmFormat)
+	raw, format, err := goft8.ReadWAVMono(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "read wav data failed: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "read wav failed: %v\n", err)
+		return 1
 	}
 
-	fmt.Printf("File: %s\n", path)
-	fmt.Printf("Format: %d Hz, %d-bit, %s\n", sampleRate, bitDepth,
-		map[int]string{1: "PCM", 3: "float"}[pcmFormat])
-	fmt.Printf("Samples: %d (%.3f s @ %d Hz)\n", nsamp, float64(nsamp)/float64(sampleRate), sampleRate)
+	formatName := map[int]string{1: "PCM", 3: "float"}[format.PCMFormat]
+	if !*jsonOut {
+		fmt.Fprintf(stdout, "File: %s\n", path)
+		fmt.Fprintf(stdout, "Format: %d Hz, %d-bit, %s\n", format.SampleRate, format.BitDepth, formatName)
+		fmt.Fprintf(stdout, "Samples: %d (%.3f s @ %d Hz)\n", len(raw), float64(len(raw))/float64(format.SampleRate), format.SampleRate)
+	}
 
-	// Downsample 48 kHz → 12 kHz if needed.
-	if sampleRate == 48000 {
-		data = downsample4x(data)
-		nsamp = len(data)
-		sampleRate = 12000
-		fmt.Printf("Downsampled to %d samples @ %d Hz\n", nsamp, sampleRate)
+	audio, err := goft8.ReadWAVMono12k(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "prepare decode audio failed: %v\n", err)
+		return 1
+	}
+	downsampled := format.SampleRate == 48000
+	if downsampled && !*jsonOut {
+		fmt.Fprintf(stdout, "Downsampled to %d samples @ %d Hz\n", len(audio), goft8.AudioSampleRate)
 	}
 
 	// Pad or truncate to exactly AudioSamplesPerCycle (180000 @ 12 kHz).
 	want := goft8.AudioSamplesPerCycle
 	samples := make([]float32, want)
-	n := nsamp
+	n := len(audio)
 	if n > want {
 		n = want
 	}
-	copy(samples, data[:n])
+	copy(samples, audio[:n])
 
-	dec := goft8.NewDecoder()
+	dec := goft8.NewDecoder(
+		goft8.WithFreqRange(*freqMin, *freqMax),
+		goft8.WithDepth(decodeDepth),
+		goft8.WithWorkers(*workers),
+	)
 	decodes, err := dec.Decode(samples)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "decode failed: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "decode failed: %v\n", err)
+		return 1
 	}
 
-	fmt.Printf("\nDecoded %d message(s):\n", len(decodes))
+	if *jsonOut {
+		if err := writeJSON(stdout, path, format, formatName, len(raw), downsampled, len(audio), decodes); err != nil {
+			fmt.Fprintf(stderr, "write json failed: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	fmt.Fprintf(stdout, "\nDecoded %d message(s):\n", len(decodes))
 	for _, d := range decodes {
-		fmt.Printf("  %-22s  |  %7.1f Hz  |  dt=%+.2f s  |  SNR=%3d dB\n",
+		fmt.Fprintf(stdout, "  %-22s  |  %7.1f Hz  |  dt=%+.2f s  |  SNR=%3d dB\n",
 			d.Message, d.Freq, d.DT, int(d.SNR))
 	}
+	return 0
 }
 
-// readWAVData reads the PCM samples from a WAV file after the fmt chunk.
-func readWAVData(path string, bitDepth, pcmFormat int) ([]float32, int, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer f.Close()
-
-	// Skip RIFF header.
-	var riff [12]byte
-	f.Read(riff[:])
-
-	// Walk chunks to find data.
-	for {
-		var hdr [8]byte
-		if _, err := f.Read(hdr[:]); err != nil {
-			return nil, 0, err
-		}
-		chunkID := string(hdr[0:4])
-		chunkSize := binary.LittleEndian.Uint32(hdr[4:8])
-
-		if chunkID == "data" {
-			return parseSamples(f, int(chunkSize), bitDepth, pcmFormat)
-		}
-
-		f.Seek(int64(chunkSize), 1)
-		if chunkSize%2 == 1 {
-			f.Seek(1, 1)
-		}
-	}
-}
-
-func parseSamples(r *os.File, size, bitDepth, pcmFormat int) ([]float32, int, error) {
-	buf := make([]byte, size)
-	if _, err := r.Read(buf); err != nil {
-		return nil, 0, err
-	}
-
-	if pcmFormat == 3 { // IEEE float
-		if bitDepth == 32 {
-			n := size / 4
-			out := make([]float32, n)
-			for i := 0; i < n; i++ {
-				out[i] = math.Float32frombits(binary.LittleEndian.Uint32(buf[i*4:]))
-			}
-			return out, n, nil
-		}
-		return nil, 0, fmt.Errorf("unsupported float bit depth %d", bitDepth)
-	}
-
-	// Integer PCM
-	switch bitDepth {
-	case 16:
-		n := size / 2
-		out := make([]float32, n)
-		for i := 0; i < n; i++ {
-			out[i] = float32(int16(binary.LittleEndian.Uint16(buf[i*2:]))) / 32768.0
-		}
-		return out, n, nil
-	case 24:
-		n := size / 3
-		out := make([]float32, n)
-		for i := 0; i < n; i++ {
-			b0 := int32(buf[i*3])
-			b1 := int32(buf[i*3+1])
-			b2 := int32(buf[i*3+2])
-			s := (b0 & 0xFF) | ((b1 & 0xFF) << 8) | ((b2 & 0xFF) << 16)
-			if s&0x800000 != 0 {
-				s |= ^0x7FFFFF
-			}
-			out[i] = float32(s) / 8388608.0
-		}
-		return out, n, nil
-	case 32:
-		n := size / 4
-		out := make([]float32, n)
-		for i := 0; i < n; i++ {
-			out[i] = float32(int32(binary.LittleEndian.Uint32(buf[i*4:]))) / 2147483648.0
-		}
-		return out, n, nil
+func parseDepth(raw string) (int, error) {
+	switch raw {
+	case "fast":
+		return goft8.DepthFast, nil
+	case "normal":
+		return goft8.DepthNormal, nil
+	case "deep":
+		return goft8.DepthDeep, nil
 	default:
-		return nil, 0, fmt.Errorf("unsupported bit depth %d", bitDepth)
+		return 0, fmt.Errorf("invalid depth %q (use fast, normal, or deep)", raw)
 	}
 }
 
-// downsample4x converts 48 kHz samples to 12 kHz by simple 4:1 averaging.
-func downsample4x(in []float32) []float32 {
-	if len(in)%4 != 0 {
-		in = in[:len(in)/4*4]
+type jsonResult struct {
+	File        string        `json:"file"`
+	Format      jsonFormat    `json:"format"`
+	Samples     int           `json:"samples"`
+	DurationSec float64       `json:"duration_sec"`
+	Downsampled *jsonDownrate `json:"downsampled,omitempty"`
+	Decoded     []jsonDecode  `json:"decoded"`
+}
+
+type jsonFormat struct {
+	SampleRate int    `json:"sample_rate"`
+	BitDepth   int    `json:"bit_depth"`
+	PCMFormat  int    `json:"pcm_format"`
+	Name       string `json:"name"`
+	Channels   int    `json:"channels"`
+}
+
+type jsonDownrate struct {
+	Samples    int `json:"samples"`
+	SampleRate int `json:"sample_rate"`
+}
+
+type jsonDecode struct {
+	Message     string  `json:"message"`
+	Freq        float64 `json:"freq"`
+	DT          float64 `json:"dt"`
+	SNR         int     `json:"snr"`
+	Pass        int     `json:"pass,omitempty"`
+	APType      int     `json:"ap_type,omitempty"`
+	NHardErrors int     `json:"n_hard_errors,omitempty"`
+}
+
+func writeJSON(stdout io.Writer, path string, format goft8.WAVFormat, formatName string, rawSamples int, downsampled bool, decodeSamples int, decodes []goft8.Decoded) error {
+	result := jsonResult{
+		File: path,
+		Format: jsonFormat{
+			SampleRate: format.SampleRate,
+			BitDepth:   format.BitDepth,
+			PCMFormat:  format.PCMFormat,
+			Name:       formatName,
+			Channels:   format.Channels,
+		},
+		Samples:     rawSamples,
+		DurationSec: float64(rawSamples) / float64(format.SampleRate),
+		Decoded:     make([]jsonDecode, len(decodes)),
 	}
-	out := make([]float32, len(in)/4)
-	for i := 0; i < len(out); i++ {
-		j := i * 4
-		out[i] = (in[j] + in[j+1] + in[j+2] + in[j+3]) * 0.25
+	if downsampled {
+		result.Downsampled = &jsonDownrate{
+			Samples:    decodeSamples,
+			SampleRate: goft8.AudioSampleRate,
+		}
 	}
-	return out
+	for i, d := range decodes {
+		result.Decoded[i] = jsonDecode{
+			Message:     d.Message,
+			Freq:        d.Freq,
+			DT:          d.DT,
+			SNR:         d.SNR,
+			Pass:        d.Pass,
+			APType:      d.APType,
+			NHardErrors: d.NHardErrors,
+		}
+	}
+
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
 }
